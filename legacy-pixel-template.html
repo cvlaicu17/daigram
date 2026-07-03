@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample diagram — feature demo</title>
+<style>
+  :root{--bg:#0e1116;--line:#30363d;--text:#e6edf3;--muted:#9aa7b4;
+        --green:#3fb950;--greenbg:#13241a;--greenln:#3fb95066;}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);margin:0;display:flex;flex-direction:column;min-height:100vh;
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:14px 24px 10px;border-bottom:1px solid var(--line)}
+  header h1{margin:0 0 3px;font-size:18px;font-weight:650}
+  header p{margin:0;color:var(--muted);font-size:12.5px}
+  header .note{color:var(--green)}
+
+  .stage-wrap{overflow:auto;padding:22px}
+  .stage-sizer{position:relative;margin:0 auto}
+  .stage{position:relative;width:2077px;height:826px;transform-origin:0 0}
+  svg.wires{position:absolute;inset:0;width:100%;height:100%;z-index:1}
+
+  .zone{position:absolute;z-index:1;border:1.4px solid #4a5560;border-radius:12px}
+  .zone .zl{position:absolute;top:-10px;left:14px;background:var(--bg);padding:0 8px;font-size:11px;color:#aeb9c4;letter-spacing:.3px}
+  .zone.eks{border-style:dashed}
+  .zone.edge{border-color:#58a6ff66;background:rgba(88,166,255,.05);border-radius:14px}
+  .zone.edge .zl{color:#8fbce6}
+
+  .box{position:absolute;z-index:2;background:var(--greenbg);border:1.5px solid var(--green);
+    border-radius:8px;padding:6px 8px;display:flex;flex-direction:column;justify-content:center;
+    text-align:center;cursor:move;transition:box-shadow .12s}
+  .box:hover,.box:focus,.box.active{box-shadow:0 6px 20px rgba(0,0,0,.5);outline:none}
+  .box.dim{opacity:.28;filter:saturate(.5)} .box.red.dim{opacity:.14}
+  .box.adj{box-shadow:0 0 0 2px #58a6ffaa}
+  .box.pinned{box-shadow:0 0 0 2px #58a6ff,0 6px 20px rgba(0,0,0,.5)}
+  .box .n{font-size:12px;font-weight:650;line-height:1.2;color:#e9f6ec}
+  .box .s{font-size:9.5px;color:#8fcaa0;margin-top:2px;line-height:1.2}
+  .box.db{border-radius:6px 6px 11px 11px}
+  .box.tall .n{writing-mode:vertical-rl;transform:rotate(180deg);margin:0 auto}
+  .box.red{background:#2a1210;border-color:#f85149;opacity:.5}
+  .box.red .n{color:#ffe2e0} .box.red .s{color:#e0938e}
+  .box.blue{background:#0d2030;border-color:#58a6ff}
+  /* "deck" = one Deployment per vendor: stacked cards painted behind the box */
+  .box.multi{--deck:5px -5px 0 0 #0d2030,5px -5px 0 1.5px #58a6ff,10px -10px 0 0 #0d2030,10px -10px 0 1.5px #58a6ff;box-shadow:var(--deck)}
+  .box.multi:hover,.box.multi:focus,.box.multi.active{box-shadow:var(--deck),0 6px 20px rgba(0,0,0,.5)}
+  .box.multi.adj{box-shadow:var(--deck),0 0 0 2px #58a6ffaa}
+  .box.multi.pinned{box-shadow:var(--deck),0 0 0 2px #58a6ff,0 6px 20px rgba(0,0,0,.5)}
+  .box.blue .n{color:#dbeafe} .box.blue .s{color:#8fbce6}
+
+  path.wire{stroke:var(--greenln);stroke-width:1.6;fill:none}
+  path.wire.blue{stroke:#58a6ffaa;stroke-width:1.9}
+  path.wire.f1{stroke:#2dd4bf;stroke-width:2.4} path.wire.f2{stroke:#c084fc;stroke-width:2.4} path.wire.f3{stroke:#f0a35e;stroke-width:2.4}
+  path.wire.hot{stroke-width:4;filter:drop-shadow(0 0 3px rgba(255,255,255,.45))}
+  path.wire.dimw{opacity:.13}
+  .wlabel.dimw{opacity:.1}
+  .wlabel.blue{fill:#8fbce6}
+  .wlabel.f1{fill:#5eead4;font-weight:600} .wlabel.f2{fill:#d8b4fe;font-weight:600} .wlabel.f3{fill:#f6c08a;font-weight:600}
+  .wlabel{font:9.5px -apple-system,sans-serif;fill:#8fcaa0}
+  .wlabel.bg{fill:var(--bg);stroke:var(--bg);stroke-width:6;stroke-linejoin:round}
+  .wlabel.hot{font-weight:600}
+  path.wire{pointer-events:none} .wlabel{pointer-events:none}
+  path.hit{stroke:transparent;stroke-width:14;fill:none;pointer-events:stroke;cursor:pointer}
+  path.wire.sel{stroke:#58a6ff !important;stroke-width:3}
+  circle.handle{fill:#58a6ff;stroke:#0e1116;stroke-width:1.5;cursor:grab;pointer-events:all}
+  circle.handle:hover{fill:#9ecbff}
+  circle.addh{fill:#0e1116;stroke:#58a6ff;stroke-width:1.3;opacity:.5;cursor:copy;pointer-events:all}
+  circle.addh:hover{opacity:1}
+  circle.endh{fill:#0e1116;stroke:#f0883e;stroke-width:2.4;cursor:grab;pointer-events:all}
+  circle.endh:hover{stroke:#ffb37a}
+  .toolbar{margin-top:8px;display:flex;gap:8px;align-items:center}
+  .toolbar button{background:#1c232d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
+  .toolbar button:hover{border-color:#58a6ff;color:#9ecbff}
+  .toolbar .sp{flex:1} .toolbar .hint{font-size:11px;color:#9aa7b4}
+  .toolbar .flowbtn{border-color:#2dd4bf;color:#5eead4;font-weight:600}
+  .toolbar .flowbtn:hover{border-color:#5eead4;background:#10242020}
+  .toolbar .zoomgrp{display:flex;gap:6px;align-items:center}
+  .toolbar .zoomgrp button{min-width:30px;padding:4px 8px;font-size:13px;line-height:1}
+  .toolbar .zlabel{font-size:12px;color:#9aa7b4;min-width:42px;text-align:center;font-variant-numeric:tabular-nums}
+  .toolbar button.on{border-color:#58a6ff;color:#9ecbff;background:#0d2030}
+
+  .layout{display:flex;flex:1;min-height:0}
+  .stage-wrap{flex:1;overflow:auto;padding:22px}
+  .detail{width:340px;flex:none;border-left:1px solid var(--line);background:#1c232d;padding:20px;overflow:auto}
+  .detail .dtag{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  .detail h2{margin:2px 0 2px;font-size:16px}
+  .detail .lead{color:var(--muted);font-size:12.5px;margin:6px 0 12px}
+  .detail .lead.empty{font-style:italic}
+  .detail .d-body{font-size:13px;line-height:1.55}
+  .detail .d-body p{margin:0 0 8px}
+  .detail .d-body h4{margin:12px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#8fbce6}
+  .detail .d-body ul{margin:0 0 8px;padding-left:18px} .detail .d-body li{margin:2px 0}
+  .detail .eg{background:#10202a;border-left:3px solid #58a6ff;border-radius:6px;padding:7px 9px;font-size:12px;color:#cfe2f5;margin-top:10px}
+  .detail .eg b{color:#58a6ff}
+  .detail .dtag.blue{color:#58a6ff} .detail .dtag.red{color:#f85149}
+
+  .footer{padding:8px 24px 18px;color:var(--muted);font-size:12px}
+  .footer b{color:var(--green)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sample diagram — feature demo</h1>
+  <p>A sample interactive diagram — every label is placeholder text.
+     <span class="note"><span style="color:#9aa7b4">grey</span> · <span style="color:#58a6ff">blue</span> · <span style="color:#f0a35e">orange</span> · <span style="color:#f85149">red</span> are just sample categories · deck = one-per-item.</span></p>
+  <div class="toolbar">
+    <button id="btnSave">Save</button>
+    <button id="btnReset">Reset</button>
+    <button id="btnExport">Export ⤓</button>
+    <button id="btnImport">Import ⤒</button>
+    <input type="file" id="fileImport" accept="application/json" style="display:none">
+    <span class="zoomgrp">
+      <button id="btnZoomOut" title="Zoom out">−</button>
+      <span class="zlabel" id="zoomLabel">100%</span>
+      <button id="btnZoomIn" title="Zoom in">+</button>
+      <button id="btnFit" title="Auto-fit to window (toggle)">Fit ⤢</button>
+    </span>
+    <span class="hint">your layout auto-restores on reload (saved in this browser)</span>
+  </div>
+</header>
+<div class="layout">
+ <div class="stage-wrap" id="stageWrap">
+  <div class="stage-sizer" id="stageSizer">
+  <div class="stage" id="stage" style="width:1240px;height:740px">
+    <div class="zone eks" style="left:40px;top:100px;width:280px;height:340px"><span class="zl">External / legacy</span></div>
+    <div class="zone eks" style="left:400px;top:100px;width:680px;height:520px"><span class="zl">Sample platform</span></div>
+    <div class="zone" style="left:840px;top:110px;width:240px;height:300px"><span class="zl">Storage / output</span></div>
+    <svg class="wires" id="wires" viewBox="0 0 1240 740" preserveAspectRatio="none"></svg>
+  </div>
+  </div>
+ </div>
+ <aside class="detail" id="detail">
+   <div class="dtag" id="d-tag">Overview</div>
+   <h2 id="d-title">Select a block</h2>
+   <p class="lead empty" id="d-lead">Click any block to see its details. This is a sample diagram — all text is placeholder.</p>
+   <div class="d-body" id="d-body"></div>
+ </aside>
+</div>
+<div class="footer"><b>Demo.</b> Drag boxes to rearrange; <b>click an arrow</b> for handles (<span style="color:#58a6ff">blue dot</span> bends it, a faint dot adds a bend, an <span style="color:#f0883e">orange tip</span> re-anchors an end); <b>zoom</b> / Fit; <b>Save / Export</b> your layout; <b>click a block</b> for details; the <b>×</b> closes the panel and clicking any block (or the <b>◂ Details</b> button) re-opens it. <b>Flow</b> buttons highlight a sample path end-to-end.</div>
+<script>
+const SVGNS="http://www.w3.org/2000/svg";
+const BOX={
+  a:{n:"Component A", s:"sample input", x:80,y:140,w:200,h:60, cls:"ext"},
+  e:{n:"Legacy E", s:"old system", x:80,y:340,w:200,h:60, cls:"red"},
+  b:{n:"Service B", s:"does something", x:440,y:140,w:200,h:60, cls:"blue"},
+  c:{n:"Service C", s:"another thing", x:440,y:340,w:200,h:60, cls:"blue"},
+  f:{n:"Module F", s:"one per item (decked)", x:440,y:540,w:200,h:60, cls:"blue"},
+  d:{n:"Data store D", s:"stores stuff", x:860,y:140,w:200,h:60, cls:"aws"},
+  g:{n:"Output G", s:"result sink", x:860,y:340,w:200,h:60, cls:"blue"},
+};
+const stage=document.getElementById("stage");
+let zoom=1;
+const MULTI=new Set(["f"]); // decked = one per item
+for(const id in BOX){const b=BOX[id];
+  const el=document.createElement("div");
+  el.className="box"+(b.cls?(" "+b.cls):"")+(MULTI.has(id)?" multi":"");el.id=id;
+  el.style.left=b.x+"px";el.style.top=b.y+"px";el.style.width=b.w+"px";el.style.height=b.h+"px";
+  el.innerHTML=`<div class="n">${b.n}</div>`+(b.s?`<div class="s">${b.s}</div>`:"");
+  el.title=b.n+(b.s?` — ${b.s}`:"");
+  el.tabIndex=0;
+  stage.appendChild(el);
+}
+function side(id,s){const b=BOX[id];switch(s){
+  case"r":return[b.x+b.w,b.y+b.h/2];case"l":return[b.x,b.y+b.h/2];
+  case"t":return[b.x+b.w/2,b.y];case"b":return[b.x+b.w/2,b.y+b.h];}}
+/* ---- wire authoring helpers ----
+   autoSides: pick the two facing sides from the boxes' relative position.
+   normWire: accept a compact object {from,to,label?,style?,fromSide?,toSide?,via?}
+   OR the legacy array [from,fs,to,ts,"v",label,style,via]. Sides are auto-picked
+   when omitted; omit `via` to let the orthogonal router draw the path. So the
+   minimum a wire needs is {from,to}. */
+function autoSides(aId,bId){const a=BOX[aId],b=BOX[bId];
+  const dx=(b.x+b.w/2)-(a.x+a.w/2), dy=(b.y+b.h/2)-(a.y+a.h/2);
+  if(Math.abs(dx)>=Math.abs(dy))return dx>=0?["r","l"]:["l","r"];
+  return dy>=0?["b","t"]:["t","b"];}
+function normWire(w){if(Array.isArray(w))return w;
+  const[afs,ats]=autoSides(w.from,w.to);
+  return[w.from,w.fromSide||afs,w.to,w.toSide||ats,"v",w.label||"",w.style||"",w.via||[]];}
+const W=[
+  {from:"a", to:"b", label:"sends",     style:"f1"},
+  {from:"e", to:"b", label:"migrate →", style:"f1"},
+  {from:"b", to:"d", label:"writes",    style:"blue"},
+  {from:"b", to:"c", label:"delegates"},
+  {from:"c", to:"g", label:"emits",     style:"blue"},
+  {from:"c", to:"f", label:"produces",  style:"f3"},
+  {from:"d", to:"g", label:"feeds",     style:"f2"},
+].map(normWire);
+const wiresEl=document.getElementById("wires");
+wiresEl.innerHTML=`<defs>
+  <marker id="ah" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#3fb95099"/></marker>
+  <marker id="abh" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#58a6ffcc"/></marker>
+  <marker id="af1" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#2dd4bf"/></marker>
+  <marker id="af2" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#c084fc"/></marker>
+  <marker id="af3" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#f0a35e"/></marker>
+</defs>`;
+function routeSimple(p,fs,q,ts){const H=s=>s==="l"||s==="r";
+  if(H(fs)&&H(ts)){const mx=(p[0]+q[0])/2;return[p,[mx,p[1]],[mx,q[1]],q];}
+  if(!H(fs)&&!H(ts)){const my=(p[1]+q[1])/2;return[p,[p[0],my],[q[0],my],q];}
+  if(H(fs))return[p,[q[0],p[1]],q];
+  return[p,[p[0],q[1]],q];}
+function mids(p,fs,q,ts){return routeSimple(p,fs,q,ts).slice(1,-1).map(a=>[a[0],a[1]]);}
+function ep(n){const w=n.w;return [n.freeFrom||side(w[0],w[1]), n.freeTo||side(w[2],w[3])];}
+const wireNodes=[];
+W.forEach(w=>{
+  const st=w[6]||"",blue=st==="blue";
+  const p=side(w[0],w[1]),q=side(w[2],w[3]);
+  const path=document.createElementNS(SVGNS,"path");
+  path.setAttribute("class","wire"+(st?(" "+st):""));
+  path.setAttribute("marker-end","url(#"+({blue:"abh",f1:"af1",f2:"af2",f3:"af3"}[st]||"ah")+")");
+  wiresEl.appendChild(path);
+  const hit=document.createElementNS(SVGNS,"path");hit.setAttribute("class","hit");wiresEl.appendChild(hit);
+  let t=null,tb=null;
+  if(w[5]){
+    tb=document.createElementNS(SVGNS,"text");tb.setAttribute("text-anchor","middle");tb.setAttribute("class","wlabel bg");tb.textContent=w[5];
+    t=document.createElementNS(SVGNS,"text");t.setAttribute("text-anchor","middle");t.setAttribute("class","wlabel"+(st?(" "+st):""));t.textContent=w[5];
+    wiresEl.appendChild(tb);wiresEl.appendChild(t);}
+  const wps=(w[7]&&w[7].length)?w[7].map(a=>[a[0],a[1]]):mids(p,w[1],q,w[3]);
+  const node={path,hit,label:t,tb,w,touch:[w[0],w[2]],wps};
+  hit.addEventListener("mousedown",e=>{e.stopPropagation();selectWire(node);});
+  hit.addEventListener("click",e=>e.stopPropagation());
+  wireNodes.push(node);
+});
+const hlayer=document.createElementNS(SVGNS,"g");wiresEl.appendChild(hlayer);
+function drawWire(n){const w=n.w,[p,q]=ep(n);
+  const pts=[p,...n.wps,q];
+  const d="M"+pts.map(a=>a[0]+","+a[1]).join(" L");
+  n.path.setAttribute("d",d);n.hit.setAttribute("d",d);
+  if(n.label){const mi=Math.floor(pts.length/2),a=pts[mi-1],b=pts[mi],mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2-2;
+    n.label.setAttribute("x",mx);n.label.setAttribute("y",my);n.tb.setAttribute("x",mx);n.tb.setAttribute("y",my);}}
+wireNodes.forEach(drawWire);
+const DESC={
+  a:{cat:"Sample · input", d:"Placeholder description for Component A. This panel is where details go — replace with real content.", pts:["A first sample bullet","A second sample bullet"], eg:"A sample example note."},
+  e:{cat:"Sample · legacy", d:"Placeholder text for a legacy component being migrated away.", pts:["Sample migration note"], eg:"e.g. an old subsystem."},
+  b:{cat:"Sample · service", d:"Placeholder description for Service B — the main processing block. It takes input, does work, and writes results.", pts:["Reads from A","Writes to the store","Delegates to C"], eg:"Sample snippet:", code:["// sample code block (demonstrates the code panel)","function handle(input) {","    const result = process(input);","    store.write(result);","    return result;","}"].join(String.fromCharCode(10))},
+  c:{cat:"Sample · service", d:"Placeholder description for Service C.", pts:["Produces items","Emits output"], eg:"A sample example for C."},
+  f:{cat:"Sample · per item", d:"A decked box — drawn as a stack to mean 'one per item'.", pts:["Created once per item"], eg:"e.g. one per tenant."},
+  d:{cat:"Sample · storage", d:"Placeholder description for a data store.", eg:"A sample datastore note."},
+  g:{cat:"Sample · output", d:"Placeholder description for an output / result sink.", eg:"A sample output note."},
+};
+const modules=[...stage.querySelectorAll(".box")];
+const dEl={tag:document.getElementById("d-tag"),title:document.getElementById("d-title"),lead:document.getElementById("d-lead"),body:document.getElementById("d-body")};
+function catClass(id){const c=BOX[id].cls;return c==="blue"?"blue":(c==="red"?"red":"");}
+function select(id){
+  const b=BOX[id],info=DESC[id]||{};
+  const adj=new Set();
+  wireNodes.forEach(w=>{if(w.touch[0]===id)adj.add(w.touch[1]);else if(w.touch[1]===id)adj.add(w.touch[0]);});
+  modules.forEach(el=>{el.classList.toggle("active",el.id===id);el.classList.toggle("adj",el.id!==id&&adj.has(el.id));el.classList.toggle("dim",el.id!==id&&!adj.has(el.id));});
+  wireNodes.forEach(w=>{const hot=w.touch.includes(id);
+    w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",!hot);
+    if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",!hot);}
+    if(w.tb)w.tb.classList.toggle("dimw",!hot);});
+  dEl.tag.className="dtag "+catClass(id); dEl.tag.textContent=info.cat||"Block";
+  dEl.title.textContent=b.n; dEl.lead.textContent=b.s||""; dEl.lead.classList.remove("empty");
+  let html="";
+  if(info.d) html+=`<p>${info.d}</p>`;
+  if(info.pts&&info.pts.length) html+=`<h4>What it does</h4><ul>${info.pts.map(p=>`<li>${p}</li>`).join("")}</ul>`;
+  if(info.eg) html+=`<div class="eg"><b>Example.</b> ${info.eg}</div>`; if(info.code) html+=`<pre style="white-space:pre;overflow-x:auto;background:#0b1622;border:1px solid #1d3a52;border-radius:6px;padding:8px 10px;margin:8px 0 0;font:11px/1.5 ui-monospace,Menlo,monospace;color:#cfe2f5">${info.code}</pre>`;
+  dEl.body.innerHTML=html||(b.s||"");
+}
+function reset(){
+  modules.forEach(el=>el.classList.remove("active","adj","dim","pinned"));
+  wireNodes.forEach(w=>{w.path.classList.remove("hot","dimw");if(w.label)w.label.classList.remove("hot","dimw");if(w.tb)w.tb.classList.remove("dimw");});
+  dEl.tag.className="dtag"; dEl.tag.textContent="Overview"; dEl.title.textContent="Select a block";
+  dEl.lead.textContent="Click any block to see its details. This is a sample diagram — all text is placeholder.";
+  dEl.lead.classList.add("empty"); dEl.body.textContent="";
+}
+let pinned=null,pinnedFlow=null;
+function pin(id){pinnedFlow=null;pinned=id;select(id);modules.forEach(el=>el.classList.toggle("pinned",el.id===id));}
+
+/* ---- wire selection + draggable handles (bends + endpoints) ---- */
+let selWire=null;
+function clearHandles(){hlayer.innerHTML="";if(selWire){selWire.path.classList.remove("sel");selWire=null;}}
+function mkC(x,y,r,cls){const c=document.createElementNS(SVGNS,"circle");c.setAttribute("cx",x);c.setAttribute("cy",y);c.setAttribute("r",r);c.setAttribute("class",cls);c.addEventListener("click",e=>e.stopPropagation());return c;}
+function off(pt,sd){return sd==="l"?[pt[0]-9,pt[1]]:sd==="r"?[pt[0]+9,pt[1]]:sd==="t"?[pt[0],pt[1]-9]:[pt[0],pt[1]+9];}
+function boxUnder(x,y){for(const id in BOX){const b=BOX[id];if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h)return id;}return null;}
+function nearestSide(id,x,y){const b=BOX[id],cx=b.x+b.w/2,cy=b.y+b.h/2,dx=(x-cx)/b.w,dy=(y-cy)/b.h;return Math.abs(dx)>=Math.abs(dy)?(dx>0?"r":"l"):(dy>0?"b":"t");}
+function buildHandles(n){
+  hlayer.innerHTML="";
+  const w=n.w,[p,q]=ep(n),pts=[p,...n.wps,q];
+  n.wps.forEach((pt,i)=>{const c=mkC(pt[0],pt[1],6,"handle");c.addEventListener("mousedown",e=>{e.stopPropagation();drag={type:"h",n,i};moved=true;});hlayer.appendChild(c);});
+  for(let i=0;i<pts.length-1;i++){const mx=(pts[i][0]+pts[i+1][0])/2,my=(pts[i][1]+pts[i+1][1])/2;
+    const c=mkC(mx,my,4,"addh");c.addEventListener("mousedown",e=>{e.stopPropagation();n.wps.splice(i,0,[mx,my]);drag={type:"h",n,i};moved=true;buildHandles(n);});hlayer.appendChild(c);}
+  [[p,n.freeFrom?null:w[1],0],[q,n.freeTo?null:w[3],1]].forEach(([pt,sd,end])=>{const hp=sd?off(pt,sd):pt;const c=mkC(hp[0],hp[1],7,"endh");c.addEventListener("mousedown",e=>{e.stopPropagation();drag={type:"e",n,end};moved=true;});hlayer.appendChild(c);});
+}
+function selectWire(n){clearHandles();selWire=n;n.path.classList.add("sel");buildHandles(n);}
+function finalizeEndpoint(d){const n=d.n,w=n.w,fp=d.end===0?n.freeFrom:n.freeTo;
+  let bid=fp?boxUnder(fp[0],fp[1]):null; if(!bid)bid=d.end===0?w[0]:w[2];
+  const sd=fp?nearestSide(bid,fp[0],fp[1]):(d.end===0?w[1]:w[3]);
+  if(d.end===0){w[0]=bid;w[1]=sd;}else{w[2]=bid;w[3]=sd;}
+  n.freeFrom=null;n.freeTo=null;n.touch=[w[0],w[2]];
+  const[p,q]=ep(n);n.wps=mids(p,w[1],q,w[3]);drawWire(n);buildHandles(n);}
+
+/* ---- drag: boxes + handles + endpoints ---- */
+let drag=null, moved=false;
+function startDrag(e,id){clearHandles();drag={type:"box",id,sx:e.clientX,sy:e.clientY,ox:BOX[id].x,oy:BOX[id].y};moved=false;e.preventDefault();}
+document.addEventListener("mousemove",e=>{
+  if(!drag)return;
+  if(drag.type==="box"){
+    const dx=(e.clientX-drag.sx)/zoom, dy=(e.clientY-drag.sy)/zoom;
+    if(Math.abs(dx)+Math.abs(dy)>3)moved=true;
+    BOX[drag.id].x=drag.ox+dx; BOX[drag.id].y=drag.oy+dy;
+    const el=document.getElementById(drag.id); el.style.left=BOX[drag.id].x+"px"; el.style.top=BOX[drag.id].y+"px";
+    wireNodes.forEach(n=>{ if(n.w[0]===drag.id||n.w[2]===drag.id){const p=side(n.w[0],n.w[1]),q=side(n.w[2],n.w[3]);n.wps=mids(p,n.w[1],q,n.w[3]);drawWire(n);if(n===selWire)buildHandles(n);} });
+  } else if(drag.type==="h"){
+    const r=stage.getBoundingClientRect();
+    const x=Math.round((e.clientX-r.left)/zoom/5)*5, y=Math.round((e.clientY-r.top)/zoom/5)*5;
+    drag.n.wps[drag.i]=[x,y]; drawWire(drag.n); buildHandles(drag.n);
+  } else {
+    const r=stage.getBoundingClientRect();
+    const x=(e.clientX-r.left)/zoom, y=(e.clientY-r.top)/zoom;
+    if(drag.end===0)drag.n.freeFrom=[x,y]; else drag.n.freeTo=[x,y];
+    drawWire(drag.n); buildHandles(drag.n);
+  }
+});
+document.addEventListener("mouseup",()=>{ if(drag&&drag.type==="e")finalizeEndpoint(drag); drag=null;});
+
+modules.forEach(el=>{
+  el.addEventListener("mousedown",e=>startDrag(e,el.id));
+  el.addEventListener("mouseenter",()=>{if(!drag)select(el.id);});
+  el.addEventListener("click",e=>{e.stopPropagation(); if(moved){moved=false;return;} pin(el.id);});
+  el.addEventListener("focus",()=>pin(el.id));
+  el.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();pin(el.id);}});
+});
+stage.addEventListener("mouseleave",()=>{if(drag)return; if(pinnedFlow)applyFlow(pinnedFlow); else if(pinned)pin(pinned); else reset();});
+document.getElementById("detail").addEventListener("click",e=>e.stopPropagation());
+wiresEl.addEventListener("mousedown",e=>{if(e.target===wiresEl)clearHandles();});
+document.body.addEventListener("click",()=>{if(moved){moved=false;return;} clearHandles();pinned=null;pinnedFlow=null;reset();});
+
+/* ---- save / restore layout ---- */
+const LSKEY="c2diagram:"+document.title;
+function captureState(){const boxes={};for(const id in BOX)boxes[id]=[BOX[id].x,BOX[id].y];
+  return {v:1,boxes,wires:wireNodes.map(n=>({f:n.w[0],fs:n.w[1],t:n.w[2],ts:n.w[3],wps:n.wps}))};}
+function applyState(st){if(!st)return;
+  if(st.boxes)for(const id in st.boxes){if(BOX[id]){BOX[id].x=st.boxes[id][0];BOX[id].y=st.boxes[id][1];const el=document.getElementById(id);el.style.left=BOX[id].x+"px";el.style.top=BOX[id].y+"px";}}
+  if(st.wires)st.wires.forEach((s,i)=>{const n=wireNodes[i];if(!n)return;if(s.f&&BOX[s.f]){n.w[0]=s.f;n.w[1]=s.fs;}if(s.t&&BOX[s.t]){n.w[2]=s.t;n.w[3]=s.ts;}if(s.wps)n.wps=s.wps.map(a=>[a[0],a[1]]);n.touch=[n.w[0],n.w[2]];});
+  wireNodes.forEach(drawWire);clearHandles();reset();}
+function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
+const bSave=document.getElementById("btnSave"),bReset=document.getElementById("btnReset"),bExp=document.getElementById("btnExport"),bImp=document.getElementById("btnImport"),fImp=document.getElementById("fileImport");
+if(bSave)bSave.addEventListener("click",e=>{e.stopPropagation();try{localStorage.setItem(LSKEY,JSON.stringify(captureState()));flash(bSave,"Saved ✓");}catch(err){flash(bSave,"⚠ use Export");}});
+if(bReset)bReset.addEventListener("click",e=>{e.stopPropagation();try{localStorage.removeItem(LSKEY);}catch(err){}location.reload();});
+if(bExp)bExp.addEventListener("click",e=>{e.stopPropagation();const blob=new Blob([JSON.stringify(captureState(),null,1)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()+"-layout.json";a.click();});
+if(bImp)bImp.addEventListener("click",e=>{e.stopPropagation();fImp.click();});
+if(fImp)fImp.addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{try{applyState(JSON.parse(rd.result));}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);fImp.value="";});
+try{const saved=localStorage.getItem(LSKEY);if(saved)applyState(JSON.parse(saved));}catch(err){}
+
+/* ---- named flow highlight (button-driven) ---- */
+const FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:["b","c","f"]},{label:"Migration",nodes:["e","b"]}];
+function applyFlow(f){const set=new Set(f.nodes);
+  modules.forEach(el=>{el.classList.toggle("adj",set.has(el.id));el.classList.remove("active");el.classList.toggle("dim",!set.has(el.id));});
+  wireNodes.forEach(w=>{const on=set.has(w.touch[0])&&set.has(w.touch[1]);
+    w.path.classList.toggle("hot",on);w.path.classList.toggle("dimw",!on);
+    if(w.label){w.label.classList.toggle("hot",on);w.label.classList.toggle("dimw",!on);}
+    if(w.tb)w.tb.classList.toggle("dimw",!on);});
+  dEl.tag.className="dtag";dEl.tag.textContent="Flow";dEl.title.textContent=f.label;
+  dEl.lead.textContent="The modules and arrows involved in the "+f.label.toLowerCase()+", end to end. Click empty space to clear.";dEl.lead.classList.remove("empty");dEl.body.innerHTML="";}
+function showFlow(f){clearHandles();pinned=null;pinnedFlow=f;applyFlow(f);}
+/* ---- zoom: in / out + auto-fit toggle ---- */
+const stageSizer=document.getElementById("stageSizer"),stageWrap=document.getElementById("stageWrap");
+const STAGE_W=parseInt(stage.style.width)||stage.offsetWidth, STAGE_H=parseInt(stage.style.height)||stage.offsetHeight;
+const zPad=44; // stage-wrap padding (22px each side)
+let fitMode=false;
+const zLabel=document.getElementById("zoomLabel"),bFit=document.getElementById("btnFit");
+function applyZoom(){
+  stage.style.transform="scale("+zoom+")";
+  stageSizer.style.width=(STAGE_W*zoom)+"px";
+  stageSizer.style.height=(STAGE_H*zoom)+"px";
+  if(zLabel)zLabel.textContent=Math.round(zoom*100)+"%";
+  if(bFit)bFit.classList.toggle("on",fitMode);
+}
+function computeFit(){
+  const aw=stageWrap.clientWidth-zPad, ah=stageWrap.clientHeight-zPad;
+  return Math.max(0.1,Math.min(aw/STAGE_W, ah/STAGE_H));
+}
+function setZoom(z,fromFit){
+  if(!fromFit)fitMode=false;
+  zoom=Math.max(0.1,Math.min(3,z));
+  applyZoom();
+}
+function doFit(){zoom=computeFit();applyZoom();}
+function toggleFit(){fitMode=!fitMode;if(fitMode)doFit();else applyZoom();}
+document.getElementById("btnZoomIn").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom+.1)*10)/10);});
+document.getElementById("btnZoomOut").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom-.1)*10)/10);});
+if(bFit)bFit.addEventListener("click",e=>{e.stopPropagation();toggleFit();});
+window.addEventListener("resize",()=>{if(fitMode)doFit();});
+applyZoom();
+
+(function(){const tb=document.querySelector(".toolbar");if(!tb)return;const hint=tb.querySelector(".hint");
+  FLOWS.forEach(f=>{const b=document.createElement("button");b.className="flowbtn";b.textContent=f.label;b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
+</script>
+<!-- detail-close-panel: adds a close (x) toggle to the details sidebar -->
+<style>
+  .detail{position:relative}
+  .d-close{position:absolute;top:8px;right:10px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--line,#30363d);background:#11202a;color:var(--muted,#9aa7b4);border-radius:6px;font-size:17px;line-height:1;cursor:pointer;z-index:6}
+  .d-close:hover{color:#fff;border-color:#58a6ff}
+  .detail.collapsed{display:none}
+  .d-reopen{position:fixed;top:12px;right:12px;display:none;align-items:center;gap:6px;padding:7px 11px;border:1px solid var(--line,#30363d);background:#11202a;color:#cfe2f5;border-radius:8px;font:600 12px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;cursor:pointer;z-index:60}
+  .d-reopen:hover{border-color:#58a6ff;color:#fff}
+</style>
+<script>
+(function(){
+  var d=document.getElementById("detail"); if(!d) return;
+  var x=document.createElement("button");
+  x.type="button"; x.className="d-close"; x.title="Close panel";
+  x.setAttribute("aria-label","Close details panel"); x.textContent="\u00d7";
+  d.insertBefore(x, d.firstChild);
+  var re=document.createElement("button");
+  re.type="button"; re.className="d-reopen"; re.title="Show details panel"; re.textContent="\u25c2 Details";
+  document.body.appendChild(re);
+  function setOpen(open){ d.classList.toggle("collapsed", !open); re.style.display = open ? "none" : "flex"; }
+  x.addEventListener("click", function(e){ e.stopPropagation(); setOpen(false); });
+  re.addEventListener("click", function(e){ e.stopPropagation(); setOpen(true); });
+  // clicking any component re-opens the panel
+  Array.prototype.forEach.call(document.querySelectorAll(".box"), function(b){ b.addEventListener("click", function(){ setOpen(true); }); });
+})();
+</script>
+</body>
+</html>

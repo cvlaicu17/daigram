@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Web service — example diagram</title>
+<style>
+  :root{--bg:#0e1116;--line:#30363d;--text:#e6edf3;--muted:#9aa7b4;
+        --green:#3fb950;--greenbg:#13241a;--greenln:#3fb95066;}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none}   /* lock the page; only inner panes scroll (keeps the toolbar fixed when the iOS keyboard opens) */
+  body{background:var(--bg);color:var(--text);margin:0;display:flex;flex-direction:column;height:100%;
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:14px 24px 10px;border-bottom:1px solid var(--line)}
+  body.noinfo .headinfo{display:none}
+  body.noinfo header{padding-top:9px}
+  body.noinfo .toolbar{margin-top:0}
+  #btnInfo{min-width:30px;padding:5px 9px}
+  #btnInfo.on{border-color:#58a6ff;color:#9ecbff;background:#0d2030}
+  header h1{margin:0 0 3px;font-size:18px;font-weight:650}
+  header p{margin:0;color:var(--muted);font-size:12.5px}
+  header .note{color:var(--green)}
+
+  .stage-wrap{overflow:auto;padding:22px}
+  .stage-sizer{position:relative;margin:0 auto}
+  .stage{position:relative;transform-origin:0 0}
+  svg.layer{position:absolute;inset:0;width:100%;height:100%}
+  svg#grid{display:none}
+  svg#wires{z-index:1}
+  .stage.editing{touch-action:none}
+  body.edit .stage{cursor:grab} .stage.panning{cursor:grabbing}
+
+  /* grid overlay (edit mode) — CSS background: zero DOM, scales infinitely */
+  body.edit .stage{--cell:64px;
+    background-image:
+      radial-gradient(circle at center, #ffffff2e 1.1px, transparent 1.6px),
+      linear-gradient(to right, #ffffff12 1px, transparent 1px),
+      linear-gradient(to bottom, #ffffff12 1px, transparent 1px);
+    background-size:var(--cell) var(--cell);
+    background-position:calc(var(--cell)/2) calc(var(--cell)/2), 0 0, 0 0}
+  .ghost{position:absolute;z-index:4;border:1.6px dashed #58a6ff;background:#58a6ff18;border-radius:8px;pointer-events:none}
+  .ghost.bad{border-color:#f85149;background:#f8514922}
+  rect.cellblock{fill:#3fb95022;stroke:none} rect.cellblock.bad{fill:#f8514933}
+
+  .zone{position:absolute;z-index:1;border:1.4px solid #4a5560;border-radius:12px;pointer-events:none}
+  .zone .zl{position:absolute;top:-10px;left:14px;background:var(--bg);padding:0 8px;font-size:11px;color:#aeb9c4;letter-spacing:.3px}
+  .zone.eks{border-style:dashed}
+  .zone.edge{border-color:#58a6ff66;background:rgba(88,166,255,.05);border-radius:14px}
+  .zone.edge .zl{color:#8fbce6}
+
+  .box{position:absolute;z-index:2;background:var(--greenbg);border:1.5px solid var(--green);
+    border-radius:8px;padding:6px 8px;display:flex;flex-direction:column;justify-content:center;
+    text-align:center;cursor:move;transition:box-shadow .12s;touch-action:none;overflow:hidden}
+  .box:hover,.box:focus,.box.active{box-shadow:0 6px 20px rgba(0,0,0,.5);outline:none}
+  .box.dim{opacity:.28;filter:saturate(.5)} .box.red.dim{opacity:.14}
+  .box.adj{box-shadow:0 0 0 2px #58a6ffaa}
+  .box.pinned{box-shadow:0 0 0 2px #58a6ff,0 6px 20px rgba(0,0,0,.5)}
+  .box .n{font-size:12px;font-weight:650;line-height:1.2;color:#e9f6ec}
+  .box .n.editing{outline:1.5px solid #58a6ff;background:#0b1622;border-radius:3px;padding:1px 4px;cursor:text;
+    -webkit-user-select:text;user-select:text;white-space:pre-wrap;min-width:16px}
+  .box .s{font-size:9.5px;color:#8fcaa0;margin-top:2px;line-height:1.2}
+  .box.db{border-radius:6px 6px 11px 11px}
+  .box.red{background:#2a1210;border-color:#f85149;opacity:.7}
+  .box.red .n{color:#ffe2e0} .box.red .s{color:#e0938e}
+  .box.blue{background:#0d2030;border-color:#58a6ff}
+  .box.multi{--deck:5px -5px 0 0 #0d2030,5px -5px 0 1.5px #58a6ff,10px -10px 0 0 #0d2030,10px -10px 0 1.5px #58a6ff;box-shadow:var(--deck)}
+  .box.multi:hover,.box.multi:focus,.box.multi.active{box-shadow:var(--deck),0 6px 20px rgba(0,0,0,.5)}
+  .box.multi.adj{box-shadow:var(--deck),0 0 0 2px #58a6ffaa}
+  .box.multi.pinned{box-shadow:var(--deck),0 0 0 2px #58a6ff,0 6px 20px rgba(0,0,0,.5)}
+  .box.blue .n{color:#dbeafe} .box.blue .s{color:#8fbce6}
+  .box.sel{box-shadow:0 0 0 2px #f0a35e,0 6px 20px rgba(0,0,0,.5)}
+
+  /* resize levers (edit + select) */
+  .lever{position:absolute;z-index:6;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;
+    background:#f0a35e;border:2px solid #0e1116;box-shadow:0 1px 4px rgba(0,0,0,.6);touch-action:none}
+  .lever.e{cursor:ew-resize}.lever.w{cursor:ew-resize}.lever.n{cursor:ns-resize}.lever.s{cursor:ns-resize}
+  .lever.ne{cursor:nesw-resize}.lever.sw{cursor:nesw-resize}.lever.nw{cursor:nwse-resize}.lever.se{cursor:nwse-resize}
+  @media (pointer:coarse){.lever{width:26px;height:26px;margin:-13px 0 0 -13px}}
+
+  path.wire{stroke:var(--greenln);stroke-width:1.6;fill:none}
+  path.wire.blue{stroke:#58a6ffaa;stroke-width:1.9}
+  path.wire.f1{stroke:#2dd4bf;stroke-width:2.4} path.wire.f2{stroke:#c084fc;stroke-width:2.4} path.wire.f3{stroke:#f0a35e;stroke-width:2.4}
+  path.wire.hot{stroke-width:4;filter:drop-shadow(0 0 3px rgba(255,255,255,.45))}
+  path.wire.dimw{opacity:.13}
+  path.wire.warn{stroke:#f85149 !important;stroke-dasharray:6 4}
+  .wlabel.dimw{opacity:.1}
+  .wlabel.blue{fill:#8fbce6}
+  .wlabel.f1{fill:#5eead4;font-weight:600} .wlabel.f2{fill:#d8b4fe;font-weight:600} .wlabel.f3{fill:#f6c08a;font-weight:600}
+  .wlabel{font:9.5px -apple-system,sans-serif;fill:#8fcaa0}
+  .wlabel.bg{fill:var(--bg);stroke:var(--bg);stroke-width:6;stroke-linejoin:round}
+  .wlabel.hot{font-weight:600}
+  path.wire{pointer-events:none} .wlabel{pointer-events:none}
+  path.hit{stroke:transparent;stroke-width:16;fill:none;pointer-events:stroke;cursor:pointer}
+  path.preview{stroke:#58a6ff;stroke-width:2.6;fill:none;stroke-dasharray:5 4}
+
+  .toolbar{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .toolbar button{background:#1c232d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer}
+  .toolbar button:hover{border-color:#58a6ff;color:#9ecbff}
+  .toolbar button:disabled{opacity:.38;cursor:default;border-color:#30363d;color:#e6edf3}
+  .toolbar .sp{flex:1} .toolbar .hint{font-size:11px;color:#9aa7b4}
+  .toolbar .zoomgrp{display:flex;gap:6px;align-items:center}
+  .toolbar .zoomgrp button{min-width:30px;padding:5px 8px;font-size:13px;line-height:1}
+  .toolbar .zlabel{font-size:12px;color:#9aa7b4;min-width:42px;text-align:center;font-variant-numeric:tabular-nums}
+  .toolbar button.on{border-color:#58a6ff;color:#9ecbff;background:#0d2030}
+  .toolbar .editbtn{border-color:#f0a35e;color:#f6c08a;font-weight:600}
+  .toolbar .editbtn.on{background:#2a1c10;border-color:#f0a35e;color:#ffce9e}
+  .editonly{display:none;gap:8px;align-items:center} body.edit .editonly{display:flex;flex-wrap:wrap}
+  .editonly button.tool.on{border-color:#f0a35e;color:#ffce9e;background:#2a1c10}
+  @media (pointer:coarse){.toolbar button{padding:9px 14px;font-size:13px}}
+
+  .layout{display:flex;flex:1;min-height:0}
+  .stage-wrap{flex:1;overflow:auto;padding:22px}
+  .detail{width:340px;flex:none;border-left:1px solid var(--line);background:#1c232d;padding:20px;overflow:auto;position:relative}
+  .detail .dtag{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  .detail h2{margin:2px 0 2px;font-size:16px}
+  .detail .lead{color:var(--muted);font-size:12.5px;margin:6px 0 12px}
+  .detail .lead.empty{font-style:italic}
+  .detail .d-body{font-size:13px;line-height:1.55}
+  .detail .d-body p{margin:0 0 8px}
+  .detail .d-body h4{margin:12px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#8fbce6}
+  .detail .d-body ul{margin:0 0 8px;padding-left:18px} .detail .d-body li{margin:2px 0}
+  .detail .eg{background:#10202a;border-left:3px solid #58a6ff;border-radius:6px;padding:7px 9px;font-size:12px;color:#cfe2f5;margin-top:10px}
+  .detail .eg b{color:#58a6ff}
+  .detail .dtag.blue{color:#58a6ff} .detail .dtag.red{color:#f85149}
+  .detail .edit-fields{display:none;margin-top:12px;border-top:1px solid var(--line);padding-top:12px}
+  body.edit .detail .edit-fields{display:block}
+  .edit-fields label{display:block;font-size:11px;color:var(--muted);margin:8px 0 3px;text-transform:uppercase;letter-spacing:.4px}
+  .edit-fields input,.edit-fields select{width:100%;background:#0e1116;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font-size:13px}
+  .d-close{position:absolute;top:8px;right:10px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--line);background:#11202a;color:var(--muted);border-radius:6px;font-size:17px;line-height:1;cursor:pointer;z-index:6}
+  .d-close:hover{color:#fff;border-color:#58a6ff}
+  .detail.collapsed{display:none}
+  .d-reopen{position:fixed;top:12px;right:12px;display:none;align-items:center;gap:6px;padding:7px 11px;border:1px solid var(--line);background:#11202a;color:#cfe2f5;border-radius:8px;font:600 12px/1 -apple-system,system-ui,sans-serif;cursor:pointer;z-index:60}
+  .d-reopen:hover{border-color:#58a6ff;color:#fff}
+
+</style>
+</head>
+<body>
+<header>
+  <div class="headinfo">
+  <h1>Web service — example diagram</h1>
+  <p>A generic web-service architecture drawn with the grid engine — client → edge/API → services → data. <span class="note">Hover a block; click to pin; use the <b style="color:#5eead4">Flow</b> buttons or toggle <b style="color:#f6c08a">✎ Edit</b> to draw.</span></p>
+  </div>
+  <div class="toolbar">
+    <button id="btnInfo" title="Show/hide the title &amp; description">ⓘ</button>
+    <button id="btnSave">Save</button>
+    <button id="btnReset">Reset</button>
+    <button id="btnExport">Export ⤓</button>
+    <button id="btnImport">Import ⤒</button>
+    <input type="file" id="fileImport" accept="application/json" style="display:none">
+    <span class="zoomgrp">
+      <button id="btnZoomOut" title="Zoom out">−</button>
+      <span class="zlabel" id="zoomLabel">100%</span>
+      <button id="btnZoomIn" title="Zoom in">+</button>
+      <button id="btnFit" title="Auto-fit to window (toggle)">Fit ⤢</button>
+    </span>
+    <button id="btnEdit" class="editbtn" title="Toggle edit mode">✎ Edit</button>
+    <span class="editonly">
+      <button class="tool on" data-tool="select" title="Select / move / resize · drag empty cells to pan">Select</button>
+      <button class="tool" data-tool="box" title="Drag over free cells to add a box">+ Box</button>
+      <button class="tool" data-tool="arrow" title="Drag box→box across cells to add an arrow">+ Arrow</button>
+      <button class="tool" data-tool="del" title="Tap a box or arrow to delete">Delete</button>
+      <button id="btnUndo" title="Undo (⌘/Ctrl+Z)" disabled>↶ Undo</button>
+      <button id="btnRedo" title="Redo (⌘/Ctrl+⇧Z)" disabled>↷ Redo</button>
+      <button id="btnCopyCfg" title="Copy the GRID/BOX/W config">Copy config</button>
+    </span>
+    <span class="hint">layout auto-restores on reload (saved in this browser)</span>
+  </div>
+</header>
+<div class="layout">
+ <div class="stage-wrap" id="stageWrap">
+  <div class="stage-sizer" id="stageSizer">
+  <div class="stage" id="stage">
+    <svg class="layer" id="grid"></svg>
+    <svg class="layer" id="wires"></svg>
+  </div>
+  </div>
+ </div>
+ <aside class="detail" id="detail">
+   <div class="dtag" id="d-tag">Overview</div>
+   <h2 id="d-title">Select a block</h2>
+   <p class="lead empty" id="d-lead">Click any block to see its details. This is a sample diagram — all text is placeholder.</p>
+   <div class="d-body" id="d-body"></div>
+   <div class="edit-fields" id="editFields">
+     <label>Title <span style="text-transform:none;color:#6b7681">· or double-tap the box</span></label><input id="ef-n" placeholder="Box title" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+     <label>Subtitle</label><input id="ef-s" placeholder="subtitle" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+     <label>Style</label>
+     <select id="ef-cls"><option value="">green</option><option value="blue">blue</option><option value="red">red</option><option value="db">db</option><option value="multi">multi (deck)</option></select>
+   </div>
+ </aside>
+</div>
+<script>
+"use strict";
+const SVGNS="http://www.w3.org/2000/svg";
+let BUILD="example-webapp";   // build_pipeline.py stamps a unique value per deploy, so a redeploy ignores stale saved layouts
+
+/* ============================ CONFIG (edit this) ============================ */
+const GRID={cols:28, rows:13, cell:54, gap:5};
+const BOX={
+  client:{n:"Client", s:"browser / app", cls:"", col:1,row:1,cw:4,ch:2},
+  cdn:{n:"CDN / Edge", s:"static assets", cls:"", col:1,row:5,cw:4,ch:2},
+  gw:{n:"API Gateway", s:"routing · rate-limit", cls:"blue", col:8,row:1,cw:4,ch:2},
+  auth:{n:"Auth Service", s:"tokens / sessions", cls:"blue", col:8,row:5,cw:4,ch:2},
+  app:{n:"App Service", s:"business logic", cls:"blue", col:15,row:1,cw:4,ch:2},
+  worker:{n:"Worker", s:"background jobs", cls:"blue", col:15,row:5,cw:4,ch:2},
+  queue:{n:"Queue", s:"message broker", cls:"db", col:15,row:9,cw:4,ch:2},
+  db:{n:"Database", s:"primary store", cls:"db", col:22,row:1,cw:4,ch:2},
+  cache:{n:"Cache", s:"in-memory", cls:"db", col:22,row:5,cw:4,ch:2},
+};
+const W=[
+  {from:"client",to:"gw", label:"request", style:"f1"},
+  {from:"client",to:"cdn", label:"assets", style:"f2"},
+  {from:"cdn",to:"gw", label:"miss", style:"f2"},
+  {from:"gw",to:"auth", label:"verify", style:"blue"},
+  {from:"gw",to:"app", label:"route", style:"f1"},
+  {from:"app",to:"db", label:"query", style:"blue"},
+  {from:"app",to:"cache", label:"read/write", style:"f2"},
+  {from:"app",to:"queue", label:"enqueue", style:"f3"},
+  {from:"queue",to:"worker", label:"consume", style:"f3"},
+  {from:"worker",to:"db", label:"persist", style:"blue"},
+];
+const ZONES=[
+  {col:0,  row:0, cw:6,  ch:8,  label:"Client tier", kind:"eks"},
+  {col:7,  row:0, cw:6,  ch:8,  label:"Edge / API",  kind:"eks"},
+  {col:14, row:0, cw:6,  ch:12, label:"Services",    kind:"edge"},
+  {col:21, row:0, cw:6,  ch:8,  label:"Data",        kind:""},
+];
+const DESC={
+  client:{cat:"Client", d:"A browser or mobile app; the origin of every request.", eg:"Talks to the API Gateway (and the CDN for static assets)."},
+  cdn:{cat:"Edge", d:"Serves cached static assets close to the user; falls back to origin on a miss.", eg:"e.g. images, JS/CSS bundles."},
+  gw:{cat:"Edge / API", d:"Front door: routing, rate-limiting, TLS termination. Authenticates via the Auth service, then routes to app services.", pts:["Rate-limit + auth","Fan out to services"]},
+  auth:{cat:"Service", d:"Issues and verifies tokens / sessions for the gateway.", eg:"e.g. JWT or opaque session tokens."},
+  app:{cat:"Service", d:"Core business logic. Reads/writes the database and cache, and enqueues background work.", pts:["Query the database","Read-through the cache","Enqueue async jobs"]},
+  worker:{cat:"Service", d:"Consumes queued messages and does background work (emails, exports, etc.), persisting results.", eg:"Scales independently of the request path."},
+  queue:{cat:"Service · broker", d:"Decouples the request path from slow work.", eg:"e.g. a message broker topic."},
+  db:{cat:"Data", d:"The primary system of record.", eg:"Written by both the app and the workers."},
+  cache:{cat:"Data", d:"In-memory cache for hot reads and short-lived state.", eg:"Read-through / write-through from the app."},
+};
+const FLOWS=[
+  {label:"Request path", nodes:["client","gw","app","db"]},
+  {label:"Static assets", nodes:["client","cdn","gw"]},
+  {label:"Async work", nodes:["app","queue","worker","db"]},
+];
+/* =========================================================================== */
+
+const stage=document.getElementById("stage"), gridSvg=document.getElementById("grid"), wiresEl=document.getElementById("wires");
+let STAGE_W, STAGE_H;
+function sizeStage(){ STAGE_W=GRID.cols*GRID.cell; STAGE_H=GRID.rows*GRID.cell;
+  stage.style.width=STAGE_W+"px"; stage.style.height=STAGE_H+"px";
+  gridSvg.setAttribute("viewBox","0 0 "+STAGE_W+" "+STAGE_H); wiresEl.setAttribute("viewBox","0 0 "+STAGE_W+" "+STAGE_H); }
+
+/* ---- geometry ---- */
+const cell=()=>GRID.cell, gap=()=>GRID.gap;
+const cx=c=>c*GRID.cell+GRID.cell/2, cy=r=>r*GRID.cell+GRID.cell/2;
+function boxRect(b){return{x:b.col*GRID.cell+GRID.gap/2, y:b.row*GRID.cell+GRID.gap/2, w:b.cw*GRID.cell-GRID.gap, h:b.ch*GRID.cell-GRID.gap};}
+function borderPt(b, side, atCell){const R=boxRect(b);
+  if(side==="r")return[R.x+R.w, cy(atCell[1])];
+  if(side==="l")return[R.x, cy(atCell[1])];
+  if(side==="t")return[cx(atCell[0]), R.y];
+  return[cx(atCell[0]), R.y+R.h];}
+function inferSide(b, c){ if(c[0]>=b.col+b.cw)return"r"; if(c[0]<b.col)return"l"; if(c[1]>=b.row+b.ch)return"b"; return"t"; }
+
+/* ============================ GRID ROUTER (tested) ============================ */
+function makeEngine(){
+  const {cols,rows}=GRID, key=(c,r)=>r*cols+c, inb=(c,r)=>c>=0&&c<cols&&r>=0&&r<rows;
+  const boxCells=new Set();
+  for(const id in BOX){const b=BOX[id];for(let c=b.col;c<b.col+b.cw;c++)for(let r=b.row;r<b.row+b.ch;r++)boxCells.add(key(c,r));}
+  const isBox=(c,r)=>boxCells.has(key(c,r));
+  const hOcc=new Set(), vOcc=new Set();
+  const freeH=(c,r)=>!hOcc.has(key(c,r)), freeV=(c,r)=>!vOcc.has(key(c,r));
+  function autoSides(a,b){const dx=(b.col+b.cw/2)-(a.col+a.cw/2), dy=(b.row+b.ch/2)-(a.row+a.ch/2);
+    if(Math.abs(dx)>=Math.abs(dy))return dx>=0?["r","l"]:["l","r"]; return dy>=0?["b","t"]:["t","b"];}
+  function sideCells(b,side){const out=[];
+    if(side==="r")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col+b.cw,r]);
+    if(side==="l")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col-1,r]);
+    if(side==="b")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row+b.ch]);
+    if(side==="t")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row-1]);
+    return out.filter(([c,r])=>inb(c,r)&&!isBox(c,r));}
+  const orient=s=>(s==="l"||s==="r")?"H":"V";
+  function commit(cells){for(let i=0;i<cells.length-1;i++){const[c1,r1]=cells[i],[c2,r2]=cells[i+1];
+    if(r1===r2){hOcc.add(key(c1,r1));hOcc.add(key(c2,r2));}else{vOcc.add(key(c1,r1));vOcc.add(key(c2,r2));}}}
+  function route(fromId,toId,fromSide,toSide){
+    const A=BOX[fromId],B=BOX[toId]; if(!A||!B)return null;
+    const[afs,ats]=autoSides(A,B); fromSide=fromSide||afs; toSide=toSide||ats;
+    let starts=sideCells(A,fromSide), goals=sideCells(B,toSide);
+    if(!starts.length)for(const s of["r","l","b","t"]){starts=sideCells(A,s);if(starts.length){fromSide=s;break;}}
+    if(!goals.length) for(const s of["r","l","b","t"]){goals =sideCells(B,s);if(goals.length){toSide=s;break;}}
+    if(!starts.length||!goals.length)return null;
+    const goalSet=new Set(goals.map(([c,r])=>key(c,r)));
+    const gh=(c,r)=>Math.min.apply(null,goals.map(([gc,gr])=>Math.abs(gc-c)+Math.abs(gr-r)));
+    const sdir=orient(fromSide)==="H"?0:1, skey=(c,r,d)=>(r*cols+c)*2+d;
+    const g=new Map(), came=new Map(), open=[], TURN=2;
+    for(const[c,r]of starts){ if(sdir===0&&!freeH(c,r))continue; if(sdir===1&&!freeV(c,r))continue;
+      const s=skey(c,r,sdir); g.set(s,0); open.push({c,r,d:sdir,f:gh(c,r),s}); }
+    let goal=null;
+    while(open.length){
+      let bi=0;for(let i=1;i<open.length;i++)if(open[i].f<open[bi].f||(open[i].f===open[bi].f&&open[i].s<open[bi].s))bi=i;
+      const cur=open.splice(bi,1)[0];
+      if(goalSet.has(key(cur.c,cur.r))){goal=cur;break;}
+      const cg=g.get(cur.s);
+      for(const[dc,dr,nd]of[[1,0,0],[-1,0,0],[0,1,1],[0,-1,1]]){
+        const nc=cur.c+dc,nr=cur.r+dr; if(!inb(nc,nr)||isBox(nc,nr))continue;
+        if(nd===0&&(!freeH(cur.c,cur.r)||!freeH(nc,nr)))continue;
+        if(nd===1&&(!freeV(cur.c,cur.r)||!freeV(nc,nr)))continue;
+        const ng=cg+1+(nd!==cur.d?TURN:0), ns=skey(nc,nr,nd);
+        if(!g.has(ns)||ng<g.get(ns)){g.set(ns,ng);came.set(ns,cur.s);open.push({c:nc,r:nr,d:nd,f:ng+gh(nc,nr),s:ns});}
+      }
+    }
+    if(!goal)return null;
+    const cells=[]; let s=goal.s;
+    while(s!==undefined){const c=Math.floor(s/2)%cols, r=Math.floor(Math.floor(s/2)/cols); cells.unshift([c,r]); s=came.get(s);}
+    commit(cells); return {cells,fromSide,toSide};
+  }
+  return {route,commit,isBox,autoSides,inb};
+}
+
+/* ---- routing + drawing all wires ---- */
+let wireNodes=[];
+function markers(){return `<defs>
+  <marker id="ah" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#3fb95099"/></marker>
+  <marker id="abh" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#58a6ffcc"/></marker>
+  <marker id="af1" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#2dd4bf"/></marker>
+  <marker id="af2" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#c084fc"/></marker>
+  <marker id="af3" markerWidth="13" markerHeight="13" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L11,5 L0,10 Z" fill="#f0a35e"/></marker>
+</defs>`;}
+function wirePoints(w){
+  const A=BOX[w.from], B=BOX[w.to]; if(!A||!B)return null;
+  let cells, fs, ts, warn=false;
+  if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells); }
+  else { const r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
+    if(!r){ // fallback: direct L, flagged
+      const[afs,ats]=ENG.autoSides(A,B); fs=w.fromSide||afs; ts=w.toSide||ats; warn=true;
+      const bp=borderPt(A,fs,[A.col+ (fs==="r"?A.cw:0), A.row]); const bq=borderPt(B,ts,[B.col,B.row]);
+      return {pts:[bp,[bq[0],bp[1]],bq], fs, ts, warn};
+    }
+    cells=r.cells; fs=r.fromSide; ts=r.toSide;
+  }
+  const pts=cells.map(([c,r])=>[cx(c),cy(r)]);
+  pts.unshift(borderPt(A,fs,cells[0]));
+  pts.push(borderPt(B,ts,cells[cells.length-1]));
+  return {pts, fs, ts, warn};
+}
+function routeAndDraw(){
+  ENG=makeEngine();
+  wiresEl.innerHTML=markers();
+  wireNodes=[];
+  W.forEach((w,i)=>{
+    const info=wirePoints(w); if(!info)return;
+    const st=w.style||"", d="M"+info.pts.map(a=>a[0].toFixed(1)+","+a[1].toFixed(1)).join(" L");
+    const path=document.createElementNS(SVGNS,"path");
+    path.setAttribute("class","wire"+(st?(" "+st):"")+(info.warn?" warn":"")); path.setAttribute("d",d);
+    path.setAttribute("marker-end","url(#"+({blue:"abh",f1:"af1",f2:"af2",f3:"af3"}[st]||"ah")+")");
+    wiresEl.appendChild(path);
+    const hit=document.createElementNS(SVGNS,"path"); hit.setAttribute("class","hit"); hit.setAttribute("d",d);
+    hit.dataset.wi=i; wiresEl.appendChild(hit);
+    let t=null,tb=null;
+    if(w.label){const mi=info.pts[Math.floor(info.pts.length/2)], mx=mi[0], my=mi[1]-3;
+      tb=document.createElementNS(SVGNS,"text");tb.setAttribute("text-anchor","middle");tb.setAttribute("class","wlabel bg");tb.setAttribute("x",mx);tb.setAttribute("y",my);tb.textContent=w.label;
+      t=document.createElementNS(SVGNS,"text");t.setAttribute("text-anchor","middle");t.setAttribute("class","wlabel"+(st?(" "+st):""));t.setAttribute("x",mx);t.setAttribute("y",my);t.textContent=w.label;
+      wiresEl.appendChild(tb);wiresEl.appendChild(t);}
+    wireNodes.push({path,label:t,tb,from:w.from,to:w.to,wi:i});
+  });
+}
+let ENG=makeEngine();
+
+/* ---- boxes ---- */
+let boxEls={};
+let zoneEls=[];
+function renderZones(){
+  zoneEls.forEach(z=>z.remove()); zoneEls=[];
+  ZONES.forEach(z=>{const R=boxRect({col:z.col,row:z.row,cw:z.cw,ch:z.ch});
+    const el=document.createElement("div"); el.className="zone"+(z.kind?(" "+z.kind):"");
+    el.style.left=(z.col*GRID.cell)+"px"; el.style.top=(z.row*GRID.cell)+"px";
+    el.style.width=(z.cw*GRID.cell)+"px"; el.style.height=(z.ch*GRID.cell)+"px";
+    el.innerHTML=`<span class="zl">${z.label||""}</span>`;
+    stage.insertBefore(el, gridSvg.nextSibling); zoneEls.push(el);
+  });
+}
+function buildBoxes(){
+  for(const id in boxEls) boxEls[id].remove(); boxEls={};
+  for(const id in BOX){const b=BOX[id];
+    const el=document.createElement("div");
+    el.className="box"+(b.cls?(" "+b.cls):""); el.id="box-"+id; el.dataset.id=id; el.tabIndex=0;
+    el.innerHTML=`<div class="n"></div>`+`<div class="s"></div>`;
+    stage.appendChild(el); boxEls[id]=el;
+    attachBoxHandlers(el,id);
+  }
+  layoutBoxes();
+}
+function layoutBoxes(){
+  for(const id in BOX){const b=BOX[id],el=boxEls[id]; if(!el)continue; const R=boxRect(b);
+    el.style.left=R.x+"px";el.style.top=R.y+"px";el.style.width=R.w+"px";el.style.height=R.h+"px";
+    el.querySelector(".n").textContent=b.n; el.querySelector(".s").textContent=b.s||"";
+    el.querySelector(".s").style.display=b.s?"":"none";
+    el.title=b.n+(b.s?" — "+b.s:"");
+  }
+}
+
+/* ---- details pane + hover/highlight (preserved from the pixel engine) ---- */
+const dEl={tag:document.getElementById("d-tag"),title:document.getElementById("d-title"),lead:document.getElementById("d-lead"),body:document.getElementById("d-body")};
+function catClass(id){const c=(BOX[id].cls||"");return c.indexOf("blue")>=0?"blue":(c.indexOf("red")>=0?"red":"");}
+function select(id){
+  const b=BOX[id],info=DESC[id]||{};
+  const adj=new Set();
+  wireNodes.forEach(w=>{if(w.from===id)adj.add(w.to);else if(w.to===id)adj.add(w.from);});
+  for(const bid in boxEls){const el=boxEls[bid];
+    el.classList.toggle("active",bid===id);el.classList.toggle("adj",bid!==id&&adj.has(bid));el.classList.toggle("dim",bid!==id&&!adj.has(bid));}
+  wireNodes.forEach(w=>{const hot=w.from===id||w.to===id;
+    w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",!hot);
+    if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",!hot);}
+    if(w.tb)w.tb.classList.toggle("dimw",!hot);});
+  dEl.tag.className="dtag "+catClass(id); dEl.tag.textContent=info.cat||"Block";
+  dEl.title.textContent=b.n; dEl.lead.textContent=b.s||""; dEl.lead.classList.remove("empty");
+  let html="";
+  if(info.d)html+=`<p>${info.d}</p>`;
+  if(info.pts&&info.pts.length)html+=`<h4>What it does</h4><ul>${info.pts.map(p=>`<li>${p}</li>`).join("")}</ul>`;
+  if(info.eg)html+=`<div class="eg"><b>Example.</b> ${info.eg}</div>`;
+  if(info.code)html+=`<pre style="white-space:pre;overflow-x:auto;background:#0b1622;border:1px solid #1d3a52;border-radius:6px;padding:8px 10px;margin:8px 0 0;font:11px/1.5 ui-monospace,Menlo,monospace;color:#cfe2f5">${info.code}</pre>`;
+  dEl.body.innerHTML=html||(b.s||"");
+  fillEditFields(id);
+}
+function reset(){
+  for(const bid in boxEls)boxEls[bid].classList.remove("active","adj","dim","pinned","sel");
+  wireNodes.forEach(w=>{w.path.classList.remove("hot","dimw");if(w.label)w.label.classList.remove("hot","dimw");if(w.tb)w.tb.classList.remove("dimw");});
+  dEl.tag.className="dtag"; dEl.tag.textContent="Overview"; dEl.title.textContent="Select a block";
+  dEl.lead.textContent="Click any block to see its details."; dEl.lead.classList.add("empty"); dEl.body.textContent="";
+  clearLevers();
+}
+let pinned=null,pinnedFlow=null;
+function pin(id){pinnedFlow=null;pinned=id;select(id);for(const bid in boxEls)boxEls[bid].classList.toggle("pinned",bid===id);}
+
+/* ============================ EDIT MODE ============================ */
+let editMode=false, tool="select", selBox=null;
+/* pt(): pull a {clientX,clientY} out of either a PointerEvent/MouseEvent or a
+   TouchEvent — so all coordinate code works for mouse, pen and touch alike. */
+function pt(e){return (e.touches&&e.touches[0])||(e.changedTouches&&e.changedTouches[0])||e;}
+/* bindStart(): start a drag from BOTH pointer and touch, de-duplicated (iOS
+   fires both for one finger). Touch wins when it just happened. */
+let lastTouch=0;
+function bindStart(el,fn){
+  el.addEventListener("touchstart",e=>{lastTouch=Date.now();fn(e);},{passive:false});
+  el.addEventListener("pointerdown",e=>{if(Date.now()-lastTouch<700)return;fn(e);});
+}
+function evCell(e){const p=pt(e),r=stage.getBoundingClientRect();
+  const c=Math.floor((p.clientX-r.left)/zoom/GRID.cell), rr=Math.floor((p.clientY-r.top)/zoom/GRID.cell);
+  return [Math.max(0,Math.min(GRID.cols-1,c)), Math.max(0,Math.min(GRID.rows-1,rr))];}
+function cellsFree(col,row,cw,ch,exceptId){
+  if(col<0||row<0||col+cw>GRID.cols||row+ch>GRID.rows)return false;
+  for(const id in BOX){if(id===exceptId)continue;const b=BOX[id];
+    if(col<b.col+b.cw&&col+cw>b.col&&row<b.row+b.ch&&row+ch>b.row)return false;}
+  return true;
+}
+function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); }  // CSS-background grid (see .stage rule)
+function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
+  document.getElementById("btnEdit").classList.toggle("on",on);
+  if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
+  clearGhosts();
+}
+function setTool(t){tool=t; selBox=null; clearLevers(); clearGhosts();
+  document.querySelectorAll(".tool").forEach(b=>b.classList.toggle("on",b.dataset.tool===t));}
+
+/* -- resize levers -- */
+let leverEls=[];
+function clearLevers(){document.querySelectorAll(".lever").forEach(l=>l.remove());leverEls=[];}
+function showLevers(id){clearLevers(); if(!editMode||tool!=="select")return; const b=BOX[id],R=boxRect(b);
+  const defs=[["nw",R.x,R.y],["n",R.x+R.w/2,R.y],["ne",R.x+R.w,R.y],["e",R.x+R.w,R.y+R.h/2],
+    ["se",R.x+R.w,R.y+R.h],["s",R.x+R.w/2,R.y+R.h],["sw",R.x,R.y+R.h],["w",R.x,R.y+R.h/2]];
+  defs.forEach(([d,x,y])=>{const l=document.createElement("div");l.className="lever "+d;l.style.left=x+"px";l.style.top=y+"px";
+    stage.appendChild(l);leverEls.push(l);
+    bindStart(l,e=>{e.stopPropagation();startResize(e,id,d);});});
+}
+/* pointer-capture drag helper — reliable on touch (iPad/iPhone). Captures the
+   pointer on the stage so pointermove/up keep firing even when the finger leaves
+   the origin element, and handles pointercancel so a drag can never get stuck. */
+function beginDrag(e,onMove,onEnd){
+  const isTouch=(typeof TouchEvent!=="undefined"&&e instanceof TouchEvent);
+  if(isTouch){
+    const mv=ev=>{ev.preventDefault();onMove(ev);};
+    const en=ev=>{window.removeEventListener("touchmove",mv);window.removeEventListener("touchend",en);window.removeEventListener("touchcancel",en);if(onEnd)onEnd(ev);};
+    window.addEventListener("touchmove",mv,{passive:false});
+    window.addEventListener("touchend",en);window.addEventListener("touchcancel",en);
+  }else{
+    const pid=e.pointerId;try{stage.setPointerCapture(pid);}catch(_){}
+    const mv=ev=>{if(ev.pointerId!==pid)return;ev.preventDefault();onMove(ev);};
+    const en=ev=>{if(ev.pointerId!==pid)return;
+      stage.removeEventListener("pointermove",mv);stage.removeEventListener("pointerup",en);stage.removeEventListener("pointercancel",en);
+      try{stage.releasePointerCapture(pid);}catch(_){}
+      if(onEnd)onEnd(ev);};
+    stage.addEventListener("pointermove",mv);stage.addEventListener("pointerup",en);stage.addEventListener("pointercancel",en);
+  }
+}
+function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,cw:b.cw,ch:b.ch};
+  beginDrag(e,ev=>{const[c,r]=evCell(ev);let n={...orig};
+    if(dir.indexOf("e")>=0)n.cw=Math.max(1,c-n.col+1);
+    if(dir.indexOf("s")>=0)n.ch=Math.max(1,r-n.row+1);
+    if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-1);n.cw=right-n.col;}
+    if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-1);n.ch=bot-n.row;}
+    if(cellsFree(n.col,n.row,n.cw,n.ch,id)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
+    ()=>commit());
+}
+
+/* -- box create (drag over cells) -- */
+function clearGhosts(){document.querySelectorAll(".ghost").forEach(g=>g.remove());}
+function stageDown(e){
+  if(!editMode)return;
+  if(tool==="box"){e.preventDefault();
+    const[c0,r0]=evCell(e);
+    clearGhosts();                                   // never leave a stray dashed box
+    const g=document.createElement("div");g.className="ghost";stage.appendChild(g);
+    let rr=null;
+    const paint=(col,row,cw,ch)=>{const R=boxRect({col,row,cw,ch});g.style.left=R.x+"px";g.style.top=R.y+"px";g.style.width=R.w+"px";g.style.height=R.h+"px";
+      g.classList.toggle("bad",!cellsFree(col,row,cw,ch,null));rr={col,row,cw,ch};};
+    const DW=3,DH=2, tc=Math.max(0,Math.min(c0,GRID.cols-DW)), tr=Math.max(0,Math.min(r0,GRID.rows-DH));
+    paint(tc,tr,DW,DH);   // a plain tap drops a DW×DH box you can then resize
+    let dragged=false;
+    beginDrag(e,ev=>{const[c,r]=evCell(ev);if(c!==c0||r!==r0)dragged=true;
+      if(dragged)paint(Math.min(c0,c),Math.min(r0,r),Math.abs(c-c0)+1,Math.abs(r-r0)+1);},
+      ()=>{g.remove();if(rr&&cellsFree(rr.col,rr.row,rr.cw,rr.ch,null)){addBox(rr);}});
+  } else {   // any non-box tool: drag empty grid to PAN (delta-based, grows infinitely)
+    e.preventDefault();
+    let px=pt(e).clientX, py=pt(e).clientY;
+    stage.classList.add("panning");
+    beginDrag(e,ev=>{const p=pt(ev);
+        stageWrap.scrollLeft-=(p.clientX-px); stageWrap.scrollTop-=(p.clientY-py);
+        px=p.clientX; py=p.clientY; maybeGrow();},
+      ()=>stage.classList.remove("panning"));
+  }
+}
+let idSeq=0;
+function newId(){let id;do{id="n"+(idSeq++);}while(BOX[id]);return id;}
+function addBox(r){const id=newId();BOX[id]={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+  buildBoxes();routeAndDraw();setTool("select");pin(id);showLevers(id);commit();}
+
+/* -- box move + click, per element -- */
+let lastTap={id:null,t:0};
+function attachBoxHandlers(el,id){
+  bindStart(el,e=>{
+    if(!editMode||editingText)return;                 // let native caret/selection work while editing text
+    if(tool==="del"){e.stopPropagation();delBox(id);return;}
+    if(tool==="arrow"){e.stopPropagation();startArrow(e,id);return;}
+    if(tool==="select"){e.stopPropagation();startMove(e,id);}
+  });
+  el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging)select(id);});
+  el.addEventListener("click",e=>{e.stopPropagation();if(moved){moved=false;return;}
+    if(!editMode){pin(id);return;}
+    if(tool!=="select")return;
+    const now=Date.now();                              // manual double-tap → inline text edit (touch + mouse)
+    if(lastTap.id===id&&now-lastTap.t<350){lastTap={id:null,t:0};startTextEdit(id);return;}
+    lastTap={id,t:now};
+    selBox=id;pin(id);showLevers(id);boxEls[id]&&boxEls[id].classList.add("sel");});
+}
+/* -- inline title editing (double-tap a box) -- */
+let editingText=null;
+function startTextEdit(id){
+  if(!editMode)return; const el=boxEls[id]; if(!el)return;
+  clearLevers(); editingText=id;
+  const n=el.querySelector(".n");
+  n.setAttribute("contenteditable","true"); n.classList.add("editing"); n.focus();
+  const range=document.createRange(); range.selectNodeContents(n);
+  const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  let done=false;
+  function finish(save){
+    if(done)return; done=true;                          // guard: blur + Enter can both fire
+    n.removeAttribute("contenteditable"); n.classList.remove("editing");
+    n.removeEventListener("blur",onBlur); n.removeEventListener("keydown",onKey);
+    editingText=null;
+    const t=n.textContent.replace(/\s+/g," ").trim();
+    if(save&&t!==BOX[id].n){BOX[id].n=t;layoutBoxes();fillEditFields(id);commit();} else layoutBoxes();
+    // undo any page scroll the iOS keyboard introduced, and keep the box selected
+    window.scrollTo(0,0); if(document.scrollingElement)document.scrollingElement.scrollTop=0;
+    if(editMode&&tool==="select"){selBox=id;pin(id);showLevers(id);}
+  }
+  function onBlur(){finish(true);}
+  function onKey(e){e.stopPropagation();
+    if(e.key==="Enter"){e.preventDefault();n.blur();}
+    else if(e.key==="Escape"){e.preventDefault();n.textContent=BOX[id].n;n.blur();}}
+  n.addEventListener("blur",onBlur); n.addEventListener("keydown",onKey);
+}
+let dragging=false,moved=false;
+function startViewDrag(){/* view mode: no drag, hover/click only */}
+function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:b.col,row:b.row};moved=false;dragging=true;
+  clearGhosts(); selBox=id;pin(id);
+  beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
+    if(nc!==b.col||nr!==b.row)moved=true;
+    if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
+    ()=>{dragging=false;commit();});
+}
+function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
+  buildBoxes();routeAndDraw();clearLevers();reset();commit();}
+
+/* -- arrow draw (drag box→cells→box) -- */
+let arrowDraw=null, previewPath=null;
+function startArrow(e,fromId){e.preventDefault();
+  arrowDraw={from:fromId,cells:[]};
+  previewPath=document.createElementNS(SVGNS,"path");previewPath.setAttribute("class","preview");wiresEl.appendChild(previewPath);
+  beginDrag(e,ev=>{const[c,r]=evCell(ev);pushCell(c,r);drawPreview();},
+    ev=>{const tgt=boxAt(...evCell(ev));
+      if(previewPath){previewPath.remove();previewPath=null;}
+      let added=false;
+      if(tgt&&tgt!==arrowDraw.from&&arrowDraw.cells.length){
+        // trim cells that are inside either box; keep the free channel
+        const path=arrowDraw.cells.filter(([c,r])=>!ENG.isBox(c,r));
+        W.push({from:arrowDraw.from,to:tgt,path:path.length?path:undefined});routeAndDraw();added=true;
+      }
+      arrowDraw=null;if(added)commit();});
+}
+function pushCell(c,r){const cs=arrowDraw.cells;if(!cs.length){cs.push([c,r]);return;}
+  let [pc,pr]=cs[cs.length-1]; if(pc===c&&pr===r)return;
+  // fill an orthogonal L between last cell and the new one (col first, then row)
+  while(pc!==c){pc+=Math.sign(c-pc);cs.push([pc,pr]);}
+  while(pr!==r){pr+=Math.sign(r-pr);cs.push([pc,pr]);}
+}
+function drawPreview(){if(!previewPath)return;const pts=arrowDraw.cells.map(([c,r])=>[cx(c),cy(r)]);
+  if(!pts.length)return;previewPath.setAttribute("d","M"+pts.map(a=>a[0]+","+a[1]).join(" L"));}
+function boxAt(c,r){for(const id in BOX){const b=BOX[id];if(c>=b.col&&c<b.col+b.cw&&r>=b.row&&r<b.row+b.ch)return id;}return null;}
+
+/* wire delete via hit paths */
+bindStart(wiresEl,e=>{const t=pt(e),el=document.elementFromPoint(t.clientX,t.clientY);const hit=el&&el.closest&&el.closest("path.hit");if(!hit)return;
+  if(editMode&&tool==="del"){e.stopPropagation();W.splice(+hit.dataset.wi,1);routeAndDraw();commit();}});
+
+/* ---- edit fields ---- */
+function fillEditFields(id){const b=BOX[id];if(!b)return;
+  document.getElementById("ef-n").value=b.n||"";
+  document.getElementById("ef-s").value=b.s||"";
+  document.getElementById("ef-cls").value=(b.cls||"").replace("multi","").trim()||"";
+}
+document.getElementById("ef-n").addEventListener("input",e=>{if(selBox){BOX[selBox].n=e.target.value;layoutBoxes();}});
+document.getElementById("ef-s").addEventListener("input",e=>{if(selBox){BOX[selBox].s=e.target.value;layoutBoxes();}});
+document.getElementById("ef-n").addEventListener("change",e=>{if(selBox)commit();});
+document.getElementById("ef-s").addEventListener("change",e=>{if(selBox)commit();});
+document.getElementById("ef-cls").addEventListener("change",e=>{if(selBox){BOX[selBox].cls=e.target.value;buildBoxes();routeAndDraw();showLevers(selBox);commit();}});
+
+/* ---- global interactions ---- */
+bindStart(stage,e=>{const t=e.target;if(t&&t.closest&&(t.closest(".box")||t.closest(".lever")))return;stageDown(e);});
+stage.addEventListener("mouseleave",()=>{if(dragging)return;if(pinnedFlow)applyFlow(pinnedFlow);else if(pinned)pin(pinned);else reset();});
+document.getElementById("detail").addEventListener("click",e=>e.stopPropagation());
+document.body.addEventListener("click",()=>{if(moved){moved=false;return;}if(editMode)return;pinned=null;pinnedFlow=null;reset();});
+
+/* ---- flows ---- */
+function applyFlow(f){const set=new Set(f.nodes);
+  for(const bid in boxEls){const el=boxEls[bid];el.classList.toggle("adj",set.has(bid));el.classList.remove("active");el.classList.toggle("dim",!set.has(bid));}
+  wireNodes.forEach(w=>{const on=set.has(w.from)&&set.has(w.to);
+    w.path.classList.toggle("hot",on);w.path.classList.toggle("dimw",!on);
+    if(w.label){w.label.classList.toggle("hot",on);w.label.classList.toggle("dimw",!on);}if(w.tb)w.tb.classList.toggle("dimw",!on);});
+  dEl.tag.className="dtag";dEl.tag.textContent="Flow";dEl.title.textContent=f.label;
+  dEl.lead.textContent="The modules and arrows involved in the "+f.label.toLowerCase()+", end to end.";dEl.lead.classList.remove("empty");dEl.body.innerHTML="";}
+function showFlow(f){pinned=null;pinnedFlow=f;applyFlow(f);}
+
+/* ---- zoom / fit ---- */
+const stageSizer=document.getElementById("stageSizer"),stageWrap=document.getElementById("stageWrap");
+let zoom=1,fitMode=false;const zPad=44;
+const zLabel=document.getElementById("zoomLabel"),bFit=document.getElementById("btnFit");
+function applyZoom(){stage.style.transform="scale("+zoom+")";stageSizer.style.width=(STAGE_W*zoom)+"px";stageSizer.style.height=(STAGE_H*zoom)+"px";
+  if(zLabel)zLabel.textContent=Math.round(zoom*100)+"%";if(bFit)bFit.classList.toggle("on",fitMode);}
+function computeFit(){const aw=stageWrap.clientWidth-zPad,ah=stageWrap.clientHeight-zPad;return Math.max(0.1,Math.min(aw/STAGE_W,ah/STAGE_H));}
+function setZoom(z,fromFit){if(!fromFit)fitMode=false;zoom=Math.max(0.1,Math.min(3,z));applyZoom();}
+function doFit(){zoom=computeFit();applyZoom();}
+function toggleFit(){fitMode=!fitMode;if(fitMode)doFit();else applyZoom();}
+document.getElementById("btnZoomIn").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom+.1)*10)/10);});
+document.getElementById("btnZoomOut").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom-.1)*10)/10);});
+if(bFit)bFit.addEventListener("click",e=>{e.stopPropagation();toggleFit();});
+window.addEventListener("resize",()=>{if(fitMode)doFit();});
+
+/* ---- persistence ---- */
+const LSKEY="griddiagram:"+document.title;
+function clonePath(p){return p?p.map(a=>[a[0],a[1]]):p;}
+function captureState(){const boxes={};for(const id in BOX)boxes[id]={...BOX[id]};
+  return{v:2,grid:{...GRID},boxes,wires:W.map(w=>({...w,path:clonePath(w.path)})),zones:ZONES.map(z=>({...z}))};}
+function applyState(st){if(!st)return;                 // deep-clone so history stays independent of live state
+  if(st.grid)Object.assign(GRID,st.grid);
+  if(st.boxes){for(const id in BOX)delete BOX[id];for(const id in st.boxes)BOX[id]={...st.boxes[id]};}
+  if(st.wires){W.length=0;st.wires.forEach(w=>W.push({...w,path:clonePath(w.path)}));}
+  if(st.zones){ZONES.length=0;st.zones.forEach(z=>ZONES.push({...z}));}
+  sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();}
+/* Re-base content to the top-left + right-size the grid. Run when loading a saved
+   layout so accumulated pan-growth / left-shifts can never leave content parked
+   off-screen (which looks like an empty diagram). */
+function normalizeState(){
+  const ids=Object.keys(BOX); if(!ids.length)return;
+  let minC=Infinity,minR=Infinity,maxC=-Infinity,maxR=-Infinity;
+  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
+  ids.forEach(id=>{const b=BOX[id];acc(b.col,b.row,b.cw,b.ch);});     // key off the real content (boxes + wires)
+  W.forEach(w=>{if(w.path)w.path.forEach(([c,r])=>acc(c,r,1,1));});
+  const M=2, dc=M-minC, dr=M-minR;
+  if(dc||dr){ids.forEach(id=>{BOX[id].col+=dc;BOX[id].row+=dr;});
+    W.forEach(w=>{if(w.path)w.path=w.path.map(([c,r])=>[c+dc,r+dr]);});
+    ZONES.forEach(z=>{z.col=Math.max(0,z.col+dc);z.row=Math.max(0,z.row+dr);});}
+  GRID.cols=Math.max(12,Math.ceil(maxC+dc+M)); GRID.rows=Math.max(8,Math.ceil(maxR+dr+M));
+  sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();
+}
+function autosave(){try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));}catch(err){}}
+
+/* ---- undo / redo history ---- */
+let history=[], hidx=-1;
+function histInit(){history=[captureState()];hidx=0;updateHistBtns();}
+function commit(){                                   // record a new committed state
+  const s=captureState();
+  if(hidx>=0&&JSON.stringify(history[hidx])===JSON.stringify(s)){autosave();return;} // no real change
+  history=history.slice(0,hidx+1);
+  history.push(s);
+  if(history.length>80)history.shift();
+  hidx=history.length-1;
+  autosave();updateHistBtns();
+}
+function undo(){if(hidx>0){hidx--;applyState(history[hidx]);autosave();updateHistBtns();}}
+function redo(){if(hidx<history.length-1){hidx++;applyState(history[hidx]);autosave();updateHistBtns();}}
+function updateHistBtns(){const u=document.getElementById("btnUndo"),r=document.getElementById("btnRedo");
+  if(u)u.disabled=hidx<=0; if(r)r.disabled=hidx>=history.length-1;}
+document.getElementById("btnUndo").addEventListener("click",e=>{e.stopPropagation();undo();});
+document.getElementById("btnRedo").addEventListener("click",e=>{e.stopPropagation();redo();});
+document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
+  if((e.metaKey||e.ctrlKey)&&k==="z"){e.preventDefault();e.shiftKey?redo():undo();}
+  else if((e.metaKey||e.ctrlKey)&&k==="y"){e.preventDefault();redo();}});
+
+/* ---- infinite canvas: grow the grid as you pan toward an edge (edit mode) ---- */
+const GROW_MARGIN=4, GROW_CHUNK=10, GRID_MAX=1500;
+function shiftBW(st,dc,dr){for(const id in st.boxes){st.boxes[id].col+=dc;st.boxes[id].row+=dr;}
+  st.wires.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
+  if(st.zones)st.zones.forEach(z=>{z.col+=dc;z.row+=dr;});}
+function gridGrow(growR,growB,dc,dr){                 // growR/B add right/bottom; dc/dr shift content right/down (grow left/top)
+  if(dc||dr){for(const id in BOX){BOX[id].col+=dc;BOX[id].row+=dr;}
+    ZONES.forEach(z=>{z.col+=dc;z.row+=dr;});
+    W.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
+    history.forEach(st=>shiftBW(st,dc,dr));}
+  GRID.cols+=growR+dc; GRID.rows+=growB+dr;
+  history.forEach(st=>{st.grid.cols+=growR+dc; st.grid.rows+=growB+dr;});   // keep undo/redo in the same frame
+}
+let growQ=false;
+function maybeGrow(){
+  if(!editMode||fitMode)return;
+  const cell=GRID.cell, w=stageWrap;
+  const overX=STAGE_W*zoom>w.clientWidth+1, overY=STAGE_H*zoom>w.clientHeight+1;
+  const left=w.scrollLeft/zoom, top=w.scrollTop/zoom, vw=w.clientWidth/zoom, vh=w.clientHeight/zoom;
+  let growR=0,growB=0,dc=0,dr=0;
+  if(overX){ if((left+vw)/cell>GRID.cols-GROW_MARGIN)growR=GROW_CHUNK; if(left/cell<GROW_MARGIN)dc=GROW_CHUNK; }
+  if(overY){ if((top+vh)/cell>GRID.rows-GROW_MARGIN)growB=GROW_CHUNK; if(top/cell<GROW_MARGIN)dr=GROW_CHUNK; }
+  if(GRID.cols+growR+dc>GRID_MAX){growR=0;dc=0;}
+  if(GRID.rows+growB+dr>GRID_MAX){growB=0;dr=0;}
+  if(!growR&&!growB&&!dc&&!dr)return;
+  gridGrow(growR,growB,dc,dr);
+  if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
+  sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
+}
+stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
+function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
+const bSave=document.getElementById("btnSave");
+bSave.addEventListener("click",e=>{e.stopPropagation();try{localStorage.setItem(LSKEY,JSON.stringify(captureState()));flash(bSave,"Saved ✓");}catch(err){flash(bSave,"⚠ use Export");}});
+document.getElementById("btnReset").addEventListener("click",e=>{e.stopPropagation();try{localStorage.removeItem(LSKEY);}catch(err){}location.reload();});
+document.getElementById("btnExport").addEventListener("click",e=>{e.stopPropagation();const blob=new Blob([JSON.stringify(captureState(),null,1)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json";a.click();});
+document.getElementById("btnImport").addEventListener("click",e=>{e.stopPropagation();document.getElementById("fileImport").click();});
+document.getElementById("fileImport").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
+  rd.onload=()=>{try{applyState(JSON.parse(rd.result));normalizeState();histInit();autosave();}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);e.target.value="";});
+document.getElementById("btnCopyCfg").addEventListener("click",e=>{e.stopPropagation();
+  const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
+  navigator.clipboard.writeText(js).then(()=>flash(e.target,"Copied ✓"),()=>{prompt("Copy config:",js);});});
+
+/* ---- toolbar: edit + tools ---- */
+document.getElementById("btnEdit").addEventListener("click",e=>{e.stopPropagation();setMode(!editMode);if(!editMode)reset();});
+document.querySelectorAll(".tool").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();setTool(b.dataset.tool);}));
+
+/* ---- header info toggle (persisted) ---- */
+const INFOKEY="griddiagram:noinfo:"+document.title, btnInfo=document.getElementById("btnInfo");
+function setInfo(show){document.body.classList.toggle("noinfo",!show);btnInfo.classList.toggle("on",show);
+  try{localStorage.setItem(INFOKEY,show?"1":"0");}catch(_){}
+  if(fitMode)doFit();}
+btnInfo.addEventListener("click",e=>{e.stopPropagation();setInfo(document.body.classList.contains("noinfo"));});
+try{setInfo(localStorage.getItem(INFOKEY)!=="0");}catch(_){setInfo(true);}
+
+/* ---- detail close/reopen ---- */
+(function(){const d=document.getElementById("detail");const x=document.createElement("button");
+  x.type="button";x.className="d-close";x.title="Close panel";x.textContent="×";d.insertBefore(x,d.firstChild);
+  const re=document.createElement("button");re.type="button";re.className="d-reopen";re.textContent="◂ Details";document.body.appendChild(re);
+  function setOpen(o){d.classList.toggle("collapsed",!o);re.style.display=o?"none":"flex";}
+  x.addEventListener("click",ev=>{ev.stopPropagation();setOpen(false);});
+  re.addEventListener("click",ev=>{ev.stopPropagation();setOpen(true);});
+})();
+
+/* ---- flow buttons ---- */
+(function(){const tb=document.querySelector(".toolbar"),hint=tb.querySelector(".hint");
+  FLOWS.forEach(f=>{const b=document.createElement("button");b.textContent=f.label;b.style.borderColor="#2dd4bf";b.style.color="#5eead4";
+    b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
+
+/* ---- boot ---- */
+sizeStage();renderZones();buildBoxes();routeAndDraw();applyZoom();
+try{const saved=localStorage.getItem(LSKEY);if(saved){const s=JSON.parse(saved);
+  if(s.__build===BUILD){applyState(s);normalizeState();}   // only restore a save made against THIS build; a new deploy shows fresh config
+  else localStorage.removeItem(LSKEY);
+}}catch(err){}
+histInit();
+</script>
+</body>
+</html>
