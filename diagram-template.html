@@ -267,7 +267,9 @@ function makeEngine(){
   const orient=s=>(s==="l"||s==="r")?"H":"V";
   function commit(cells){for(let i=0;i<cells.length-1;i++){const[c1,r1]=cells[i],[c2,r2]=cells[i+1];
     if(r1===r2){hOcc.add(key(c1,r1));hOcc.add(key(c2,r2));}else{vOcc.add(key(c1,r1));vOcc.add(key(c2,r2));}}}
-  function route(fromId,toId,fromSide,toSide){
+  function route(fromId,toId,fromSide,toSide,relax){
+    // relax=true: ignore wire-occupancy (allow sharing a lane) but STILL never cross a box.
+    const okH=(c,r)=>relax||freeH(c,r), okV=(c,r)=>relax||freeV(c,r);
     const A=BOX[fromId],B=BOX[toId]; if(!A||!B)return null;
     const[afs,ats]=autoSides(A,B); fromSide=fromSide||afs; toSide=toSide||ats;
     let starts=sideCells(A,fromSide), goals=sideCells(B,toSide);
@@ -278,7 +280,7 @@ function makeEngine(){
     const gh=(c,r)=>Math.min.apply(null,goals.map(([gc,gr])=>Math.abs(gc-c)+Math.abs(gr-r)));
     const sdir=orient(fromSide)==="H"?0:1, skey=(c,r,d)=>(r*cols+c)*2+d;
     const g=new Map(), came=new Map(), open=[], TURN=2;
-    for(const[c,r]of starts){ if(sdir===0&&!freeH(c,r))continue; if(sdir===1&&!freeV(c,r))continue;
+    for(const[c,r]of starts){ if(sdir===0&&!okH(c,r))continue; if(sdir===1&&!okV(c,r))continue;
       const s=skey(c,r,sdir); g.set(s,0); open.push({c,r,d:sdir,f:gh(c,r),s}); }
     let goal=null;
     while(open.length){
@@ -288,8 +290,8 @@ function makeEngine(){
       const cg=g.get(cur.s);
       for(const[dc,dr,nd]of[[1,0,0],[-1,0,0],[0,1,1],[0,-1,1]]){
         const nc=cur.c+dc,nr=cur.r+dr; if(!inb(nc,nr)||isBox(nc,nr))continue;
-        if(nd===0&&(!freeH(cur.c,cur.r)||!freeH(nc,nr)))continue;
-        if(nd===1&&(!freeV(cur.c,cur.r)||!freeV(nc,nr)))continue;
+        if(nd===0&&(!okH(cur.c,cur.r)||!okH(nc,nr)))continue;
+        if(nd===1&&(!okV(cur.c,cur.r)||!okV(nc,nr)))continue;
         const ng=cg+1+(nd!==cur.d?TURN:0), ns=skey(nc,nr,nd);
         if(!g.has(ns)||ng<g.get(ns)){g.set(ns,ng);came.set(ns,cur.s);open.push({c:nc,r:nr,d:nd,f:ng+gh(nc,nr),s:ns});}
       }
@@ -315,8 +317,9 @@ function wirePoints(w){
   const A=BOX[w.from], B=BOX[w.to]; if(!A||!B)return null;
   let cells, fs, ts, warn=false;
   if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells); }
-  else { const r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
-    if(!r){ // fallback: direct L, flagged
+  else { let r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
+    if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); warn=!!r; } // relaxed: route AROUND boxes, may share a lane
+    if(!r){ // last resort — only if no box-avoiding orthogonal path exists at all (target enclosed)
       const[afs,ats]=ENG.autoSides(A,B); fs=w.fromSide||afs; ts=w.toSide||ats; warn=true;
       const bp=borderPt(A,fs,[A.col+ (fs==="r"?A.cw:0), A.row]); const bq=borderPt(B,ts,[B.col,B.row]);
       return {pts:[bp,[bq[0],bp[1]],bq], fs, ts, warn};

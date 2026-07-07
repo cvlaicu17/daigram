@@ -10,7 +10,9 @@ visual editor.
 
 ## Features
 - **Grid-snapped boxes** (integer cell blocks) and **auto-routed orthogonal arrows**
-  (A\* router, deterministic, dashed-red fallback when a route can't be placed).
+  (A\* router, deterministic). Arrows **never cross boxes**: when a channel is
+  over-crowded the router reroutes *around* the boxes sharing a lane (drawn dashed);
+  the dashed-red direct fallback appears only if a target has no box-avoiding path at all.
 - **Hover/highlight** — hovering a box lights it + its connections and dims the rest; click to pin.
 - **Visual edit mode** (toggle **✎ Edit**), fully **touch-first** (native touch + pointer/mouse):
   - **+ Box** drag over empty cells (or tap for a default box)
