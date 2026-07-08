@@ -22,6 +22,9 @@ visual editor.
   - **Pan / infinite canvas** — drag empty grid; the grid grows as you pan toward any edge
   - **Undo / Redo** (buttons or ⌘/Ctrl+Z, ⌘/Ctrl+⇧Z)
   - **Copy config** — emits the `GRID`/`BOX`/`W` literals back out
+- **Nested / expandable boxes** — a box can carry its own canvas (`sub`). Click the **⤢** button on a
+  box to expand into it; a **breadcrumb bar** (`◂ Back · ⌂ Root › … › …`) brings you back. Recursive to
+  any depth. In edit mode a **＋** button on any box creates a sub-canvas on demand.
 - **Zoom** (+/−, Fit), a **details pane**, named **Flow** highlight buttons, **zones** (grouping rectangles).
 - **Persistence** — autosaves to `localStorage`, plus Export/Import JSON. A build stamp
   means a newer copy of the file ignores stale saved layouts.
@@ -35,19 +38,21 @@ cp diagram-template.html my-diagram.html
 Everything is driven by a few literals in the `CONFIG (edit this)` block:
 
 ```js
-const GRID = { cols:18, rows:11, cell:64, gap:5 };          // canvas = cols*cell × rows*cell
-const BOX = {
+let GRID = { cols:18, rows:11, cell:64, gap:5 };          // canvas = cols*cell × rows*cell
+let BOX = {
   a: { n:"Title", s:"subtitle", cls:"blue", col:1, row:2, cw:3, ch:2 },   // cell block (min 1×1)
   // cls: "" green · blue · red · db · multi (decked); combine like "blue multi"
+  b: { n:"Parent", col:7, row:2, cw:3, ch:2,                              // a box can nest its own canvas:
+       sub:{ GRID:{cols:14,rows:9,cell:64,gap:5}, BOX:{ /* …recursive… */ }, W:[], ZONES:[], DESC:{}, FLOWS:[] } },
 };
-const W = [
+let W = [
   { from:"a", to:"b" },                             // sides + route fully auto
   { from:"a", to:"b", label:"sends", style:"f1" },  // style: ""|blue|f1|f2|f3
   { from:"a", to:"b", path:[[7,4],[7,5],[9,5]] },   // explicit cell path (what +Arrow writes)
 ];
-const ZONES = [ { col:0,row:1,cw:5,ch:9,label:"Group", kind:"eks" } ];  // kind: ""|eks(dashed)|edge(blue)
-const DESC  = { a:{ cat:"…", d:"…", pts:["…"], eg:"…", code:"…" } };     // details-pane content
-const FLOWS = [ { label:"Main path", nodes:["a","b"] } ];                // Flow buttons
+let ZONES = [ { col:0,row:1,cw:5,ch:9,label:"Group", kind:"eks" } ];  // kind: ""|eks(dashed)|edge(blue)
+let DESC  = { a:{ cat:"…", d:"…", pts:["…"], eg:"…", code:"…" } };     // details-pane content
+let FLOWS = [ { label:"Main path", nodes:["a","b"] } ];                // Flow buttons
 ```
 
 **Tip:** leave empty rows/cols between boxes as routing channels — boxes packed

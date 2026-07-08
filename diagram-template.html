@@ -132,14 +132,28 @@
   .d-reopen{position:fixed;top:12px;right:12px;display:none;align-items:center;gap:6px;padding:7px 11px;border:1px solid var(--line);background:#11202a;color:#cfe2f5;border-radius:8px;font:600 12px/1 -apple-system,system-ui,sans-serif;cursor:pointer;z-index:60}
   .d-reopen:hover{border-color:#58a6ff;color:#fff}
 
+  /* expandable / nested boxes */
+  .box .boxexp{position:absolute;top:3px;right:3px;width:19px;height:19px;display:none;align-items:center;justify-content:center;
+    padding:0;font-size:12px;line-height:1;border-radius:5px;border:1px solid #ffffff44;background:#0e1116cc;color:inherit;cursor:pointer;z-index:5}
+  .box .boxexp:hover{border-color:#58a6ff;color:#9ecbff;background:#0d2030}
+  .box.hassub{box-shadow:0 0 0 1.5px #ffffff26,0 3px 10px rgba(0,0,0,.45)}
+  .box.multi.hassub{box-shadow:var(--deck),0 0 0 1.5px #ffffff26}
+  @media (pointer:coarse){.box .boxexp{width:26px;height:26px;font-size:14px}}
+  #crumbBar{display:none;margin-top:8px;gap:6px;align-items:center;flex-wrap:wrap}
+  #crumbBar.on{display:flex}
+  #crumbBar .crumb{background:#1c232d;color:#cfe2f5;border:1px solid #30363d;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer}
+  #crumbBar .crumb:hover{border-color:#58a6ff;color:#9ecbff}
+  #crumbBar .crumb.back{border-color:#f0a35e;color:#f6c08a;font-weight:600}
+  #crumbBar .crumb.cur{background:#0d2030;border-color:#58a6ff;color:#9ecbff;cursor:default}
+  #crumbBar .crumbsep{color:#6b7681}
 </style>
 </head>
 <body>
 <header>
   <div class="headinfo">
-  <h1>Grid diagram — feature demo</h1>
-  <p>Boxes snap to a cell grid; arrows auto-route on the grid (no two share a cell in the same orientation — perpendicular crossings are fine).
-     <span class="note">Toggle <b style="color:#f6c08a">Edit</b> to draw/resize boxes and arrows by dragging (touch-friendly).</span></p>
+  <h1>Grid diagram — nested / expandable boxes</h1>
+  <p>Boxes snap to a cell grid; arrows auto-route. A box can hold its own canvas — click the <b class="note">⤢</b> button on a box to expand into it; the breadcrumb bar brings you back. Nesting is recursive.
+     <span class="note">Toggle <b style="color:#f6c08a">Edit</b> to draw/resize boxes and arrows (the <b>＋</b> button on a box creates a sub-canvas).</span></p>
   </div>
   <div class="toolbar">
     <button id="btnInfo" title="Show/hide the title &amp; description">ⓘ</button>
@@ -195,17 +209,33 @@ const SVGNS="http://www.w3.org/2000/svg";
 let BUILD="dev";   // build_pipeline.py stamps a unique value per deploy, so a redeploy ignores stale saved layouts
 
 /* ============================ CONFIG (edit this) ============================ */
-const GRID={cols:18, rows:11, cell:64, gap:5};
-const BOX={
+let GRID={cols:18, rows:11, cell:64, gap:5};
+let BOX={
   a:{n:"Component A", s:"sample input", cls:"",     col:1, row:2, cw:3, ch:2},
   e:{n:"Legacy E",    s:"old system",   cls:"red",  col:1, row:7, cw:3, ch:2},
-  b:{n:"Service B",   s:"does something",cls:"blue", col:7, row:2, cw:3, ch:2},
+  // A box can hold its own canvas via `sub` (recursive). Click the ⤢ button to expand.
+  b:{n:"Service B",   s:"does something",cls:"blue", col:7, row:2, cw:3, ch:2, sub:{
+       GRID:{cols:16, rows:9, cell:64, gap:5},
+       BOX:{
+         h1:{n:"Handler",  s:"entry point", cls:"blue", col:1, row:3, cw:3, ch:2},
+         h2:{n:"Validator", s:"checks input", cls:"",   col:6, row:3, cw:3, ch:2},
+         h3:{n:"Writer",   s:"persists",    cls:"db",   col:11,row:3, cw:3, ch:2, sub:{
+              GRID:{cols:12, rows:7, cell:64, gap:5},
+              BOX:{ w1:{n:"Buffer", s:"", cls:"", col:1, row:2, cw:3, ch:2},
+                    w2:{n:"Flush",  s:"", cls:"db", col:7, row:2, cw:3, ch:2} },
+              W:[{from:"w1", to:"w2", label:"flush", style:"blue"}], ZONES:[], DESC:{}, FLOWS:[] }},
+       },
+       W:[ {from:"h1", to:"h2", label:"validate", style:"f1"},
+           {from:"h2", to:"h3", label:"write",    style:"blue"} ],
+       ZONES:[{col:0,row:2,cw:15,ch:4,label:"inside Service B",kind:"eks"}],
+       DESC:{ h3:{cat:"inner", d:"The Writer itself expands — nesting is recursive."} },
+       FLOWS:[] }},
   c:{n:"Service C",   s:"another thing", cls:"blue", col:7, row:5, cw:3, ch:2},
   f:{n:"Module F",    s:"one per item",  cls:"blue multi", col:7, row:8, cw:3, ch:2},
   d:{n:"Data store D",s:"stores stuff",  cls:"db",   col:14,row:2, cw:3, ch:2},
   g:{n:"Output G",    s:"result sink",   cls:"blue", col:14,row:6, cw:3, ch:2},
 };
-const W=[
+let W=[
   {from:"a", to:"b", label:"sends",     style:"f1"},
   {from:"e", to:"b", label:"migrate →", style:"f1"},
   {from:"b", to:"d", label:"writes",    style:"blue"},
@@ -214,12 +244,12 @@ const W=[
   {from:"c", to:"f", label:"produces",  style:"f3"},
   {from:"d", to:"g", label:"feeds",     style:"f2"},
 ];
-const ZONES=[
+let ZONES=[
   {col:0,  row:1, cw:5,  ch:9, label:"External / legacy", kind:"eks"},
   {col:6,  row:1, cw:5,  ch:9, label:"Sample platform",   kind:"eks"},
   {col:13, row:1, cw:5,  ch:7, label:"Storage / output",  kind:""},
 ];
-const DESC={
+let DESC={
   a:{cat:"Sample · input", d:"Placeholder description for Component A. This panel is where details go — replace with real content.", pts:["A first sample bullet","A second sample bullet"], eg:"A sample example note."},
   e:{cat:"Sample · legacy", d:"Placeholder text for a legacy component being migrated away.", pts:["Sample migration note"], eg:"e.g. an old subsystem."},
   b:{cat:"Sample · service", d:"Placeholder description for Service B — the main processing block.", pts:["Reads from A","Writes to the store","Delegates to C"], eg:"Sample snippet:", code:["function handle(input){","  const r=process(input);","  store.write(r);","  return r;","}"].join(String.fromCharCode(10))},
@@ -228,8 +258,54 @@ const DESC={
   d:{cat:"Sample · storage", d:"Placeholder description for a data store.", eg:"A sample datastore note."},
   g:{cat:"Sample · output", d:"Placeholder description for an output / result sink.", eg:"A sample output note."},
 };
-const FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:["b","c","f"]},{label:"Migration",nodes:["e","b"]}];
+let FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:["b","c","f"]},{label:"Migration",nodes:["e","b"]}];
 /* =========================================================================== */
+
+/* ==================== NESTED / EXPANDABLE BOXES (added) ====================
+   A box may carry `sub:{GRID,BOX,W,ZONES,DESC,FLOWS}` — its own recursive canvas.
+   NAV holds the path of box ids from the root to the current view; the six config
+   bindings above are re-pointed into the active sub-diagram on enter/back, so the
+   whole engine (render/edit/route/zoom) operates unchanged on the current level. */
+let ROOT={GRID,BOX,W,ZONES,DESC,FLOWS};   // stable handle to the top-level diagram
+let NAV=[];                               // e.g. ["b","h3"] = Root › Service B › Writer
+function normDiag(d){ d.GRID=d.GRID||{cols:14,rows:9,cell:(GRID&&GRID.cell)||64,gap:(GRID&&GRID.gap)||5};
+  d.BOX=d.BOX||{}; d.W=d.W||[]; d.ZONES=d.ZONES||[]; d.DESC=d.DESC||{}; d.FLOWS=d.FLOWS||[]; return d; }
+function newSub(){ return normDiag({}); }
+function diagramAt(path){ let d=ROOT; for(const id of path){ if(!d.BOX||!d.BOX[id]||!d.BOX[id].sub)return null; d=d.BOX[id].sub; } return d; }
+function applyPath(){                      // re-point the active bindings to diagramAt(NAV) and re-render
+  const d=normDiag(diagramAt(NAV)||ROOT);
+  GRID=d.GRID; BOX=d.BOX; W=d.W; ZONES=d.ZONES; DESC=d.DESC; FLOWS=d.FLOWS;
+  selBox=null; pinned=null; pinnedFlow=null;
+  sizeStage(); renderZones(); buildBoxes(); routeAndDraw();
+  if(editMode)drawGridOverlay();
+  reset(); clearLevers();
+  if(fitMode)doFit(); else applyZoom();
+  renderBreadcrumb();
+}
+function enterBox(id){
+  if(!BOX[id])return;
+  if(!BOX[id].sub){ if(!editMode)return; BOX[id].sub=newSub(); commit(); }  // edit mode: create a canvas on demand
+  NAV.push(id); applyPath();
+}
+function goToDepth(n){ if(n<NAV.length){ NAV.length=Math.max(0,n); applyPath(); } }
+function goBack(){ if(NAV.length){ NAV.pop(); applyPath(); } }
+let crumbBar=null;
+function renderBreadcrumb(){
+  if(!crumbBar){ crumbBar=document.createElement("div"); crumbBar.id="crumbBar";
+    const tb=document.querySelector(".toolbar"); tb.parentNode.insertBefore(crumbBar, tb.nextSibling); }
+  crumbBar.classList.toggle("on", NAV.length>0);
+  if(!NAV.length){ crumbBar.innerHTML=""; return; }
+  crumbBar.innerHTML="";
+  const mk=(label,cls,depth,cur)=>{ const b=document.createElement("button"); b.className="crumb"+(cls?(" "+cls):"");
+    b.textContent=label; if(!cur)b.addEventListener("click",e=>{e.stopPropagation();(depth<0?goBack():goToDepth(depth));}); return b; };
+  crumbBar.appendChild(mk("◂ Back","back",-1,false));
+  crumbBar.appendChild(mk("⌂ Root","",0,NAV.length===0));
+  let d=ROOT;
+  NAV.forEach((id,i)=>{ const nm=(d.BOX&&d.BOX[id]&&d.BOX[id].n)||id;
+    const sep=document.createElement("span"); sep.className="crumbsep"; sep.textContent="›"; crumbBar.appendChild(sep);
+    crumbBar.appendChild(mk(nm,(i===NAV.length-1?"cur":""),i+1,i===NAV.length-1));
+    d=(d.BOX&&d.BOX[id]&&d.BOX[id].sub)||{}; });
+}
 
 const stage=document.getElementById("stage"), gridSvg=document.getElementById("grid"), wiresEl=document.getElementById("wires");
 let STAGE_W, STAGE_H;
@@ -373,6 +449,10 @@ function buildBoxes(){
     const el=document.createElement("div");
     el.className="box"+(b.cls?(" "+b.cls):""); el.id="box-"+id; el.dataset.id=id; el.tabIndex=0;
     el.innerHTML=`<div class="n"></div>`+`<div class="s"></div>`;
+    const exp=document.createElement("button"); exp.className="boxexp"; exp.type="button";
+    exp.addEventListener("click",e=>{e.stopPropagation();enterBox(id);});
+    bindStart(exp,e=>{e.stopPropagation();});   // don't start a move/resize from the expand button
+    el.appendChild(exp);
     stage.appendChild(el); boxEls[id]=el;
     attachBoxHandlers(el,id);
   }
@@ -384,6 +464,10 @@ function layoutBoxes(){
     el.querySelector(".n").textContent=b.n; el.querySelector(".s").textContent=b.s||"";
     el.querySelector(".s").style.display=b.s?"":"none";
     el.title=b.n+(b.s?" — "+b.s:"");
+    const has=!!b.sub, exp=el.querySelector(".boxexp");
+    el.classList.toggle("hassub",has);
+    if(exp){ exp.style.display=(has||editMode)?"flex":"none";
+      exp.textContent=has?"⤢":"＋"; exp.title=has?"Enter sub-diagram":"Create sub-diagram"; }
   }
 }
 
@@ -445,6 +529,7 @@ function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); } 
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
+  layoutBoxes();   // show/hide the per-box expand(+) buttons for the new mode
   clearGhosts();
 }
 function setTool(t){tool=t; selBox=null; clearLevers(); clearGhosts();
@@ -655,14 +740,26 @@ window.addEventListener("resize",()=>{if(fitMode)doFit();});
 /* ---- persistence ---- */
 const LSKEY="griddiagram:"+document.title;
 function clonePath(p){return p?p.map(a=>[a[0],a[1]]):p;}
-function captureState(){const boxes={};for(const id in BOX)boxes[id]={...BOX[id]};
-  return{v:2,grid:{...GRID},boxes,wires:W.map(w=>({...w,path:clonePath(w.path)})),zones:ZONES.map(z=>({...z}))};}
-function applyState(st){if(!st)return;                 // deep-clone so history stays independent of live state
-  if(st.grid)Object.assign(GRID,st.grid);
-  if(st.boxes){for(const id in BOX)delete BOX[id];for(const id in st.boxes)BOX[id]={...st.boxes[id]};}
-  if(st.wires){W.length=0;st.wires.forEach(w=>W.push({...w,path:clonePath(w.path)}));}
-  if(st.zones){ZONES.length=0;st.zones.forEach(z=>ZONES.push({...z}));}
-  sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();}
+/* Serialize the WHOLE tree (a box's `sub` recurses) so nested edits persist; captureState
+   also records the current NAV path so a reload restores the same view. */
+function serializeDiagram(D){D=normDiag(D);const boxes={};
+  for(const id in D.BOX){const b=D.BOX[id];const c={...b};if(b.sub)c.sub=serializeDiagram(b.sub);boxes[id]=c;}
+  return{grid:{...D.GRID},boxes,wires:D.W.map(w=>({...w,path:clonePath(w.path)})),
+    zones:D.ZONES.map(z=>({...z})),desc:{...D.DESC},flows:D.FLOWS.map(f=>({...f,nodes:(f.nodes||[]).slice()}))};}
+function buildDiagram(s){const D=normDiag({grid:undefined});
+  D.GRID={...s.grid};D.W=(s.wires||[]).map(w=>({...w,path:clonePath(w.path)}));
+  D.ZONES=(s.zones||[]).map(z=>({...z}));D.DESC={...(s.desc||{})};D.FLOWS=(s.flows||[]).map(f=>({...f,nodes:(f.nodes||[]).slice()}));
+  D.BOX={};for(const id in(s.boxes||{})){const b={...s.boxes[id]};if(b.sub)b.sub=buildDiagram(b.sub);D.BOX[id]=b;}
+  return D;}
+function captureState(){return{v:3,root:serializeDiagram(ROOT),nav:NAV.slice()};}
+function applyState(st){if(!st)return;
+  const src=st.root?st.root:(st.boxes?{grid:st.grid,boxes:st.boxes,wires:st.wires,zones:st.zones}:null);
+  if(!src)return;
+  ROOT=buildDiagram(src);
+  NAV=(st.nav||[]).slice();
+  let d=ROOT,v=0;for(const id of NAV){if(d.BOX&&d.BOX[id]&&d.BOX[id].sub){d=normDiag(d.BOX[id].sub);v++;}else break;}
+  NAV.length=v;
+  applyPath();}   // re-points the active bindings to the current path and re-renders
 /* Re-base content to the top-left + right-size the grid. Run when loading a saved
    layout so accumulated pan-growth / left-shifts can never leave content parked
    off-screen (which looks like an empty diagram). */
@@ -773,9 +870,9 @@ try{setInfo(localStorage.getItem(INFOKEY)!=="0");}catch(_){setInfo(true);}
     b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
 
 /* ---- boot ---- */
-sizeStage();renderZones();buildBoxes();routeAndDraw();applyZoom();
+sizeStage();renderZones();buildBoxes();routeAndDraw();applyZoom();renderBreadcrumb();
 try{const saved=localStorage.getItem(LSKEY);if(saved){const s=JSON.parse(saved);
-  if(s.__build===BUILD){applyState(s);normalizeState();}   // only restore a save made against THIS build; a new deploy shows fresh config
+  if(s.__build===BUILD){applyState(s);if(!NAV.length)normalizeState();}   // only restore a save made against THIS build; normalize only the top level
   else localStorage.removeItem(LSKEY);
 }}catch(err){}
 histInit();
