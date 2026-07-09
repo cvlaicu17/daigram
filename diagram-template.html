@@ -807,8 +807,9 @@ document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
 
 /* ---- infinite canvas: grow the grid as you pan toward an edge (edit mode) ---- */
 const GROW_MARGIN=4, GROW_CHUNK=10, GRID_MAX=1500;
-function shiftBW(st,dc,dr){for(const id in st.boxes){st.boxes[id].col+=dc;st.boxes[id].row+=dr;}
-  st.wires.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
+function shiftBW(st,dc,dr){if(!st||!st.boxes)return;   // new-format history ({v:3,root,nav}) is self-contained — skip
+  for(const id in st.boxes){st.boxes[id].col+=dc;st.boxes[id].row+=dr;}
+  if(st.wires)st.wires.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
   if(st.zones)st.zones.forEach(z=>{z.col+=dc;z.row+=dr;});}
 function gridGrow(growR,growB,dc,dr){                 // growR/B add right/bottom; dc/dr shift content right/down (grow left/top)
   if(dc||dr){for(const id in BOX){BOX[id].col+=dc;BOX[id].row+=dr;}
@@ -816,7 +817,7 @@ function gridGrow(growR,growB,dc,dr){                 // growR/B add right/botto
     W.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
     history.forEach(st=>shiftBW(st,dc,dr));}
   GRID.cols+=growR+dc; GRID.rows+=growB+dr;
-  history.forEach(st=>{st.grid.cols+=growR+dc; st.grid.rows+=growB+dr;});   // keep undo/redo in the same frame
+  history.forEach(st=>{if(st&&st.grid){st.grid.cols+=growR+dc; st.grid.rows+=growB+dr;}});   // flat-format snapshots only
 }
 let growQ=false;
 function maybeGrow(){
@@ -833,6 +834,7 @@ function maybeGrow(){
   gridGrow(growR,growB,dc,dr);
   if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
   sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
+  if(selBox&&editMode)showLevers(selBox);   // a left/top grow shifts the selected box → move its handles too
 }
 stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
 function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
