@@ -478,12 +478,14 @@ function select(id){
   const b=BOX[id],info=DESC[id]||{};
   const adj=new Set();
   wireNodes.forEach(w=>{if(w.from===id)adj.add(w.to);else if(w.to===id)adj.add(w.from);});
+  // Highlight/dim is a VIEW-mode focus cue; in edit mode keep every box fully visible
+  // (dimming others to opacity .28 made them look like they vanish while arranging).
   for(const bid in boxEls){const el=boxEls[bid];
-    el.classList.toggle("active",bid===id);el.classList.toggle("adj",bid!==id&&adj.has(bid));el.classList.toggle("dim",bid!==id&&!adj.has(bid));}
-  wireNodes.forEach(w=>{const hot=w.from===id||w.to===id;
-    w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",!hot);
-    if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",!hot);}
-    if(w.tb)w.tb.classList.toggle("dimw",!hot);});
+    el.classList.toggle("active",!editMode&&bid===id);el.classList.toggle("adj",!editMode&&bid!==id&&adj.has(bid));el.classList.toggle("dim",!editMode&&bid!==id&&!adj.has(bid));}
+  wireNodes.forEach(w=>{const hot=!editMode&&(w.from===id||w.to===id),dw=!editMode&&!(w.from===id||w.to===id);
+    w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",dw);
+    if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",dw);}
+    if(w.tb)w.tb.classList.toggle("dimw",dw);});
   dEl.tag.className="dtag "+catClass(id); dEl.tag.textContent=info.cat||"Block";
   dEl.title.textContent=b.n; dEl.lead.textContent=b.s||""; dEl.lead.classList.remove("empty");
   let html="";
