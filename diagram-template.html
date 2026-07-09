@@ -656,6 +656,9 @@ let dragging=false,moved=false;
 function startViewDrag(){/* view mode: no drag, hover/click only */}
 function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:b.col,row:b.row};moved=false;dragging=true;
   clearGhosts(); selBox=id;pin(id);
+  // Select on pointerdown: the stage pointer-capture (beginDrag) retargets the post-pointerup
+  // click to the stage, so the box click never fires — do the visual selection here instead.
+  for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id);
   beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
     if(nc!==b.col||nr!==b.row)moved=true;
     if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
