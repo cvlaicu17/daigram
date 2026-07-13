@@ -139,11 +139,14 @@
   .box.hassub{box-shadow:0 0 0 1.5px #ffffff26,0 3px 10px rgba(0,0,0,.45)}
   .box.multi.hassub{box-shadow:var(--deck),0 0 0 1.5px #ffffff26}
   /* an expanded box becomes a translucent container holding its sub-canvas at full size */
-  .box.container{background:#0d1117a6;border:1.5px solid #566472;justify-content:flex-start;align-items:stretch;
+  /* faint fill only: svg#wires sits BELOW boxes (z1 vs z2), so an opaque container background
+     paints over its own sub-canvas wires (they'd show only on hover). Keep it near-transparent
+     like a zone so the wires stay visible; border + header + button still read as a container. */
+  .box.container{background:#0d11171f;border:1.5px solid #566472;justify-content:flex-start;align-items:stretch;
     padding:3px 7px;cursor:default;box-shadow:none;overflow:visible}
   .box.container>.n{font-size:11px;font-weight:600;color:#b7c2cd;text-align:left;letter-spacing:.2px}
-  .box.container.blue{border-color:#58a6ff88;background:#0d20308c}
-  .box.container.red{border-color:#f8514988;background:#2a12108c}
+  .box.container.blue{border-color:#58a6ff88;background:#0d20302e}
+  .box.container.red{border-color:#f8514988;background:#2a12102e}
   .box.container:hover{box-shadow:0 0 0 1.5px #58a6ff66}
   .box.container>.boxexp{background:#161b22e6}
   @media (pointer:coarse){.box .boxexp{width:26px;height:26px;font-size:14px}}
