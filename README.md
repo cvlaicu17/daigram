@@ -27,6 +27,10 @@ visual editor.
   boxes aside ("insert space"). Multiple boxes open at once, recursively — **⤢ Expand all** shows the
   whole hierarchy on one canvas; **⤡** collapses. Expansion is a view overlay (the base tree stays
   editable in Edit mode); the flattened display reuses the same router/zoom/pan.
+  - **Cross-subtree wires** — a wire in any level's `W` may reference a *descendant* by slash-path
+    (`{from:"p1/childA", to:"p2/childB"}`, declared at the common ancestor). It renders **only when
+    both endpoints are visible** — i.e. when both parents are expanded — so you can draw child↔child
+    links between two different containers that appear once you drill into both.
 - **Zoom** (+/−, Fit), a **details pane**, named **Flow** highlight buttons, **zones** (grouping rectangles).
 - **Persistence** — autosaves to `localStorage`, plus Export/Import JSON. A build stamp
   means a newer copy of the file ignores stale saved layouts.
