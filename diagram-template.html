@@ -677,7 +677,13 @@ function attachBoxHandlers(el,id){
     if(!editMode||editingText)return;                 // let native caret/selection work while editing text
     if(tool==="del"){e.stopPropagation();delBox(id);return;}
     if(tool==="arrow"){e.stopPropagation();startArrow(e,id);return;}
-    if(tool==="select"){e.stopPropagation();startMove(e,id);}
+    if(tool==="select"){e.stopPropagation();
+      // double-tap → inline rename. Detect on POINTERDOWN: the click event is eaten by the stage
+      // pointer-capture in edit mode, so the click-based detector below never fires here.
+      const now=Date.now();
+      if(lastTap.id===id&&now-lastTap.t<350){lastTap={id:null,t:0};startTextEdit(id);return;}
+      lastTap={id,t:now};
+      startMove(e,id);}
   });
   el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging&&!pinned)select(id);});   // a pinned selection is sticky — hover won't steal it
   el.addEventListener("click",e=>{e.stopPropagation();if(moved){moved=false;return;}
