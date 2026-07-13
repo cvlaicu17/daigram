@@ -696,6 +696,11 @@ function attachBoxHandlers(el,id){
 }
 /* -- inline title editing (double-tap a box) -- */
 let editingText=null;
+// Resolve a (possibly nested) display fid like "msvc/vendorcode/robinpub" to the box object in the
+// BASE tree (ROOT), so edits made while a box is expanded persist instead of dying with the overlay.
+function rootBoxByFid(fid){ const p=String(fid).split("/"); let b=ROOT.BOX[p[0]];
+  for(let i=1;i<p.length&&b;i++){ b=(b.sub&&b.sub.BOX)?b.sub.BOX[p[i]]:null; } return b||null; }
+function setBoxName(fid,name){ const rb=rootBoxByFid(fid); if(rb)rb.n=name; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].n=name; }
 function startTextEdit(id){
   if(!editMode)return; const el=boxEls[id]; if(!el)return;
   clearLevers(); editingText=id;
@@ -710,7 +715,8 @@ function startTextEdit(id){
     n.removeEventListener("blur",onBlur); n.removeEventListener("keydown",onKey);
     editingText=null;
     const t=n.textContent.replace(/\s+/g," ").trim();
-    if(save&&t!==BOX[id].n){BOX[id].n=t;layoutBoxes();fillEditFields(id);commit();} else layoutBoxes();
+    const cur=(rootBoxByFid(id)||BOX[id]||{}).n;
+    if(save&&t!==cur){setBoxName(id,t);layoutBoxes();fillEditFields(id);commit();} else layoutBoxes();   // write to the base tree so it persists
     // undo any page scroll the iOS keyboard introduced, and keep the box selected
     window.scrollTo(0,0); if(document.scrollingElement)document.scrollingElement.scrollTop=0;
     if(editMode&&tool==="select"){selBox=id;pin(id);showLevers(id);}
@@ -718,7 +724,7 @@ function startTextEdit(id){
   function onBlur(){finish(true);}
   function onKey(e){e.stopPropagation();
     if(e.key==="Enter"){e.preventDefault();n.blur();}
-    else if(e.key==="Escape"){e.preventDefault();n.textContent=BOX[id].n;n.blur();}}
+    else if(e.key==="Escape"){e.preventDefault();n.textContent=(rootBoxByFid(id)||BOX[id]).n;n.blur();}}
   n.addEventListener("blur",onBlur); n.addEventListener("keydown",onKey);
 }
 let dragging=false,moved=false;
@@ -772,7 +778,7 @@ function fillEditFields(id){const b=BOX[id];if(!b)return;
   document.getElementById("ef-s").value=b.s||"";
   document.getElementById("ef-cls").value=(b.cls||"").replace("multi","").trim()||"";
 }
-document.getElementById("ef-n").addEventListener("input",e=>{if(selBox){BOX[selBox].n=e.target.value;layoutBoxes();}});
+document.getElementById("ef-n").addEventListener("input",e=>{if(selBox){setBoxName(selBox,e.target.value);layoutBoxes();}});
 document.getElementById("ef-s").addEventListener("input",e=>{if(selBox){BOX[selBox].s=e.target.value;layoutBoxes();}});
 document.getElementById("ef-n").addEventListener("change",e=>{if(selBox)commit();});
 document.getElementById("ef-s").addEventListener("change",e=>{if(selBox)commit();});
