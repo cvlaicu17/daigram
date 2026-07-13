@@ -685,7 +685,7 @@ function attachBoxHandlers(el,id){
       lastTap={id,t:now};
       startMove(e,id);}
   });
-  el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging&&!pinned)select(id);});   // a pinned selection is sticky — hover won't steal it
+  el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging&&!pinned&&!pinnedFlow)select(id);});   // a pinned selection OR an active flow is sticky — hover won't steal it
   el.addEventListener("click",e=>{e.stopPropagation();if(moved){moved=false;return;}
     if(!editMode){pin(id);return;}
     if(tool!=="select")return;
