@@ -541,9 +541,11 @@ function select(id){
   for(const bid in boxEls){const el=boxEls[bid];
     const kin=bid===id||bid.indexOf(id+"/")===0||id.indexOf(bid+"/")===0;   // self / ancestor / descendant by fid path — don't dim
     el.classList.toggle("active",!editMode&&bid===id);el.classList.toggle("adj",!editMode&&bid!==id&&adj.has(bid));el.classList.toggle("dim",!editMode&&!kin&&!adj.has(bid));}
-  wireNodes.forEach(w=>{const hot=!editMode&&(w.from===id||w.to===id),dw=!editMode&&!(w.from===id||w.to===id);
-    w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",dw);
-    if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",dw);}
+  // Always highlight the selected box's own arrows (hot) — in edit mode too; only DIM the rest in
+  // view mode (in edit mode keep every wire visible while arranging).
+  wireNodes.forEach(w=>{const isN=(w.from===id||w.to===id), dw=!editMode&&!isN;
+    w.path.classList.toggle("hot",isN);w.path.classList.toggle("dimw",dw);
+    if(w.label){w.label.classList.toggle("hot",isN);w.label.classList.toggle("dimw",dw);}
     if(w.tb)w.tb.classList.toggle("dimw",dw);});
   dEl.tag.className="dtag "+catClass(id); dEl.tag.textContent=info.cat||"Block";
   dEl.title.textContent=b.n; dEl.lead.textContent=b.s||""; dEl.lead.classList.remove("empty");
@@ -678,7 +680,7 @@ function attachBoxHandlers(el,id){
     if(tool==="arrow"){e.stopPropagation();startArrow(e,id);return;}
     if(tool==="select"){e.stopPropagation();startMove(e,id);}
   });
-  el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging)select(id);});
+  el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging&&!pinned)select(id);});   // a pinned selection is sticky — hover won't steal it
   el.addEventListener("click",e=>{e.stopPropagation();if(moved){moved=false;return;}
     if(!editMode){pin(id);return;}
     if(tool!=="select")return;
