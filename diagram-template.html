@@ -377,7 +377,11 @@ function inferSide(b, c){ if(c[0]>=b.col+b.cw)return"r"; if(c[0]<b.col)return"l"
 function makeEngine(){
   const {cols,rows}=GRID, key=(c,r)=>r*cols+c, inb=(c,r)=>c>=0&&c<cols&&r>=0&&r<rows;
   const boxCells=new Set();
-  for(const id in BOX){const b=BOX[id];for(let c=b.col;c<b.col+b.cw;c++)for(let r=b.row;r<b.row+b.ch;r++)boxCells.add(key(c,r));}
+  // Container backdrops (expanded boxes) are transparent groupings that ENCLOSE their children —
+  // don't treat them as obstacles, or wires between those children have no path and fall back to
+  // the box-crossing last resort (rendered red-dashed). Only leaf boxes block routing.
+  for(const id in BOX){const b=BOX[id]; if(b._container)continue;
+    for(let c=b.col;c<b.col+b.cw;c++)for(let r=b.row;r<b.row+b.ch;r++)boxCells.add(key(c,r));}
   const isBox=(c,r)=>boxCells.has(key(c,r));
   const hOcc=new Set(), vOcc=new Set();
   const freeH=(c,r)=>!hOcc.has(key(c,r)), freeV=(c,r)=>!vOcc.has(key(c,r));
@@ -443,7 +447,7 @@ function wirePoints(w){
   let cells, fs, ts, warn=false;
   if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells); }
   else { let r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
-    if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); warn=!!r; } // relaxed: route AROUND boxes, may share a lane
+    if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); } // relaxed: still routes AROUND boxes (may share a lane) — valid, NOT a warning
     if(!r){ // last resort — only if no box-avoiding orthogonal path exists at all (target enclosed)
       const[afs,ats]=ENG.autoSides(A,B); fs=w.fromSide||afs; ts=w.toSide||ats; warn=true;
       const bp=borderPt(A,fs,[A.col+ (fs==="r"?A.cw:0), A.row]); const bq=borderPt(B,ts,[B.col,B.row]);
