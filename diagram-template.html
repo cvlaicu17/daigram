@@ -352,8 +352,8 @@ function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); render(); au
 /* the ⤢/⤡/＋ button on a box (id here is the BOX key = fid in display, plain id when collapsed) */
 function boxExpandBtn(id){
   const b=BOX[id]; if(!b)return; const has=(b._hasSub!==undefined?b._hasSub:!!b.sub);
-  if(editMode){ if(!has){ (ROOT.BOX[id]||b).sub=newSub(); commit(); layoutBoxes(); } return; }  // edit: create a stub sub
-  if(has) toggleExpand(id);
+  if(!has){ if(editMode){ (ROOT.BOX[id]||b).sub=newSub(); commit(); layoutBoxes(); } return; }  // no sub → (edit only) create a stub
+  toggleExpand(id);   // has a sub → expand / collapse in BOTH view and edit mode
 }
 
 const stage=document.getElementById("stage"), gridSvg=document.getElementById("grid"), wiresEl=document.getElementById("wires");
@@ -523,8 +523,8 @@ function layoutBoxes(){
     el.style.zIndex = 2 + (b._depth||0)*2;               // children sit above their container
     el.querySelector(".s").style.display=(b.s&&!isC)?"":"none";   // container shows title only
     if(exp){
-      if(editMode){ exp.style.display=has?"none":"flex"; exp.textContent="＋"; exp.title="Create a sub-canvas"; }
-      else { exp.style.display=has?"flex":"none"; exp.textContent=isC?"⤡":"⤢"; exp.title=isC?"Collapse":"Expand in place"; }
+      if(has){ exp.style.display="flex"; exp.textContent=isC?"⤡":"⤢"; exp.title=isC?"Collapse":"Expand in place"; }  // has a sub → expand/collapse (both modes)
+      else { exp.style.display=editMode?"flex":"none"; exp.textContent="＋"; exp.title="Create a sub-canvas"; }        // leaf → create (edit only)
     }
   }
 }
@@ -592,8 +592,7 @@ function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); } 
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
-  if(on&&EXPANDED.size){ EXPANDED.clear(); render(); }   // edit works on the base tree; collapse the view overlay
-  else layoutBoxes();                                     // else just refresh the per-box buttons for the mode
+  if(EXPANDED.size) render(); else layoutBoxes();   // keep expansions across the mode toggle; refresh per-box buttons
   clearGhosts();
 }
 function setTool(t){tool=t; selBox=null; clearLevers(); clearGhosts();
