@@ -138,6 +138,14 @@
   .box .boxexp:hover{border-color:#58a6ff;color:#9ecbff;background:#0d2030}
   .box.hassub{box-shadow:0 0 0 1.5px #ffffff26,0 3px 10px rgba(0,0,0,.45)}
   .box.multi.hassub{box-shadow:var(--deck),0 0 0 1.5px #ffffff26}
+  /* an expanded box becomes a translucent container holding its sub-canvas at full size */
+  .box.container{background:#0d1117a6;border:1.5px solid #566472;justify-content:flex-start;align-items:stretch;
+    padding:3px 7px;cursor:default;box-shadow:none;overflow:visible}
+  .box.container>.n{font-size:11px;font-weight:600;color:#b7c2cd;text-align:left;letter-spacing:.2px}
+  .box.container.blue{border-color:#58a6ff88;background:#0d20308c}
+  .box.container.red{border-color:#f8514988;background:#2a12108c}
+  .box.container:hover{box-shadow:0 0 0 1.5px #58a6ff66}
+  .box.container>.boxexp{background:#161b22e6}
   @media (pointer:coarse){.box .boxexp{width:26px;height:26px;font-size:14px}}
   #crumbBar{display:none;margin-top:8px;gap:6px;align-items:center;flex-wrap:wrap}
   #crumbBar.on{display:flex}
@@ -151,9 +159,9 @@
 <body>
 <header>
   <div class="headinfo">
-  <h1>Grid diagram — nested / expandable boxes</h1>
-  <p>Boxes snap to a cell grid; arrows auto-route. A box can hold its own canvas — click the <b class="note">⤢</b> button on a box to expand into it; the breadcrumb bar brings you back. Nesting is recursive.
-     <span class="note">Toggle <b style="color:#f6c08a">Edit</b> to draw/resize boxes and arrows (the <b>＋</b> button on a box creates a sub-canvas).</span></p>
+  <h1>Grid diagram — inline expandable boxes</h1>
+  <p>Boxes snap to a cell grid; arrows auto-route. A box can hold its own canvas — click <b class="note">⤢</b> to <b>expand it in place</b>: it enlarges to show its contents at full size and pushes the other boxes aside. Multiple boxes open at once, recursively (<b class="note">⤢ Expand all</b>), so you can see the whole hierarchy on one canvas. <b class="note">⤡</b> collapses.
+     <span class="note">Toggle <b style="color:#f6c08a">Edit</b> to draw/resize boxes and arrows.</span></p>
   </div>
   <div class="toolbar">
     <button id="btnInfo" title="Show/hide the title &amp; description">ⓘ</button>
@@ -261,50 +269,88 @@ let DESC={
 let FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:["b","c","f"]},{label:"Migration",nodes:["e","b"]}];
 /* =========================================================================== */
 
-/* ==================== NESTED / EXPANDABLE BOXES (added) ====================
+/* ==================== INLINE EXPANDABLE BOXES ====================
    A box may carry `sub:{GRID,BOX,W,ZONES,DESC,FLOWS}` — its own recursive canvas.
-   NAV holds the path of box ids from the root to the current view; the six config
-   bindings above are re-pointed into the active sub-diagram on enter/back, so the
-   whole engine (render/edit/route/zoom) operates unchanged on the current level. */
-let ROOT={GRID,BOX,W,ZONES,DESC,FLOWS};   // stable handle to the top-level diagram
-let NAV=[];                               // e.g. ["b","h3"] = Root › Service B › Writer
-function normDiag(d){ d.GRID=d.GRID||{cols:14,rows:9,cell:(GRID&&GRID.cell)||64,gap:(GRID&&GRID.gap)||5};
+   Expand = enlarge IN PLACE: the sub-diagram renders inside the box at full size and the
+   siblings are pushed right/below ("insert space") to make room. Multiple boxes + recursive,
+   all on one canvas. ROOT (the tree, with base col/row/cw/ch) is the source of truth; the
+   DISPLAY is either ROOT itself (collapsed) or a FLATTENED diagram (path-prefixed ids +
+   container boxes) fed to the same renderer/router. EXPANDED holds the open fids. */
+let ROOT={GRID,BOX,W,ZONES,DESC,FLOWS};
+let EXPANDED=new Set();                    // open fids, e.g. "b", "b/h3"
+const NEST_M=1, NEST_HEAD=1;               // container interior margin + header rows
+function normDiag(d){ d.GRID=d.GRID||{cols:14,rows:9,cell:(ROOT&&ROOT.GRID?ROOT.GRID.cell:64),gap:(ROOT&&ROOT.GRID?ROOT.GRID.gap:5)};
   d.BOX=d.BOX||{}; d.W=d.W||[]; d.ZONES=d.ZONES||[]; d.DESC=d.DESC||{}; d.FLOWS=d.FLOWS||[]; return d; }
 function newSub(){ return normDiag({}); }
-function diagramAt(path){ let d=ROOT; for(const id of path){ if(!d.BOX||!d.BOX[id]||!d.BOX[id].sub)return null; d=d.BOX[id].sub; } return d; }
-function applyPath(){                      // re-point the active bindings to diagramAt(NAV) and re-render
-  const d=normDiag(diagramAt(NAV)||ROOT);
-  GRID=d.GRID; BOX=d.BOX; W=d.W; ZONES=d.ZONES; DESC=d.DESC; FLOWS=d.FLOWS;
+function allSubFids(D,prefix,out){ D=normDiag(D); for(const id in D.BOX){ const b=D.BOX[id];
+  if(b.sub){ out.push(prefix+id); allSubFids(b.sub, prefix+id+"/", out); } } return out; }
+
+/* Lay out one diagram level -> {boxes:[{fid,id,col,row,cw,ch,depth,container,hasSub,n,s,cls,desc}],
+   wires, zones, w, h}; coords normalized so content starts at (0,0). Recurses into open subs. */
+function layoutLevel(D, prefix, depth){
+  D=normDiag(D);
+  const eff={};
+  for(const id in D.BOX){ const b=D.BOX[id];
+    eff[id]={fid:prefix+id,id,col:b.col,row:b.row,cw:b.cw,ch:b.ch,box:b,hasSub:!!b.sub,container:false}; }
+  const order=Object.keys(eff).sort((a,b)=>(eff[a].row-eff[b].row)||(eff[a].col-eff[b].col));
+  for(const id of order){ const e=eff[id];
+    if(e.hasSub && EXPANDED.has(e.fid)){
+      const ch=layoutLevel(e.box.sub, e.fid+"/", depth+1);
+      e._child=ch; e.container=true;
+      e.cw=Math.max(e.box.cw, ch.w+2*NEST_M);
+      e.ch=Math.max(e.box.ch, NEST_HEAD+ch.h+2*NEST_M);
+    } }
+  for(const id of order){ const e=eff[id]; if(!e.container)continue;   // insert-space reflow
+    const dw=e.cw-e.box.cw, dh=e.ch-e.box.ch, rE=e.col+e.box.cw, bE=e.row+e.box.ch;
+    for(const oid in eff){ if(oid===id)continue; const x=eff[oid];
+      if(x.col>=rE)x.col+=dw; if(x.row>=bE)x.row+=dh; } }
+  let boxes=[], wires=[], zones=[];
+  for(const id in eff){ const e=eff[id];
+    boxes.push({fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
+      n:e.box.n,s:e.box.s,cls:e.box.cls,desc:D.DESC[id]});
+    if(e.container){ const oc=e.col+NEST_M, orow=e.row+NEST_HEAD+NEST_M;
+      for(const cb of e._child.boxes) boxes.push({...cb, col:cb.col+oc, row:cb.row+orow});
+      for(const w of e._child.wires) wires.push(w);
+      for(const z of e._child.zones) zones.push({...z, col:z.col+oc, row:z.row+orow});
+    } }
+  for(const w of D.W) wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style});
+  for(const z of D.ZONES) zones.push({col:z.col,row:z.row,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
+  let minC=Infinity,minR=Infinity,maxC=0,maxR=0;
+  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
+  boxes.forEach(b=>acc(b.col,b.row,b.cw,b.ch)); zones.forEach(z=>acc(z.col,z.row,z.cw,z.ch));
+  if(!isFinite(minC)){minC=0;minR=0;}
+  boxes.forEach(b=>{b.col-=minC;b.row-=minR;}); zones.forEach(z=>{z.col-=minC;z.row-=minR;});
+  return {boxes,wires,zones,w:maxC-minC,h:maxR-minR};
+}
+function buildDisplay(){
+  const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
+  for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
+    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid}; if(b.desc)Dd[b.fid]=b.desc; }
+  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style});
+  for(const z of L.zones) Zd.push({col:z.col+M,row:z.row+M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
+  return {GRID:{cols:Math.max(12,L.w+3*M),rows:Math.max(8,L.h+3*M),cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
+          BOX:BOXd, W:Wd, ZONES:Zd, DESC:Dd, FLOWS:ROOT.FLOWS};
+}
+/* render(): collapsed -> ROOT live (editable); expanded -> flattened display (view overlay). */
+function render(){
+  const disp = EXPANDED.size===0
+    ? {GRID:ROOT.GRID,BOX:ROOT.BOX,W:ROOT.W,ZONES:ROOT.ZONES,DESC:ROOT.DESC,FLOWS:ROOT.FLOWS}
+    : buildDisplay();
+  GRID=disp.GRID; BOX=disp.BOX; W=disp.W; ZONES=disp.ZONES; DESC=disp.DESC; FLOWS=disp.FLOWS;
   selBox=null; pinned=null; pinnedFlow=null;
   sizeStage(); renderZones(); buildBoxes(); routeAndDraw();
   if(editMode)drawGridOverlay();
   reset(); clearLevers();
   if(fitMode)doFit(); else applyZoom();
-  renderBreadcrumb();
 }
-function enterBox(id){
-  if(!BOX[id])return;
-  if(!BOX[id].sub){ if(!editMode)return; BOX[id].sub=newSub(); commit(); }  // edit mode: create a canvas on demand
-  NAV.push(id); applyPath();
-}
-function goToDepth(n){ if(n<NAV.length){ NAV.length=Math.max(0,n); applyPath(); } }
-function goBack(){ if(NAV.length){ NAV.pop(); applyPath(); } }
-let crumbBar=null;
-function renderBreadcrumb(){
-  if(!crumbBar){ crumbBar=document.createElement("div"); crumbBar.id="crumbBar";
-    const tb=document.querySelector(".toolbar"); tb.parentNode.insertBefore(crumbBar, tb.nextSibling); }
-  crumbBar.classList.toggle("on", NAV.length>0);
-  if(!NAV.length){ crumbBar.innerHTML=""; return; }
-  crumbBar.innerHTML="";
-  const mk=(label,cls,depth,cur)=>{ const b=document.createElement("button"); b.className="crumb"+(cls?(" "+cls):"");
-    b.textContent=label; if(!cur)b.addEventListener("click",e=>{e.stopPropagation();(depth<0?goBack():goToDepth(depth));}); return b; };
-  crumbBar.appendChild(mk("◂ Back","back",-1,false));
-  crumbBar.appendChild(mk("⌂ Root","",0,NAV.length===0));
-  let d=ROOT;
-  NAV.forEach((id,i)=>{ const nm=(d.BOX&&d.BOX[id]&&d.BOX[id].n)||id;
-    const sep=document.createElement("span"); sep.className="crumbsep"; sep.textContent="›"; crumbBar.appendChild(sep);
-    crumbBar.appendChild(mk(nm,(i===NAV.length-1?"cur":""),i+1,i===NAV.length-1));
-    d=(d.BOX&&d.BOX[id]&&d.BOX[id].sub)||{}; });
+function toggleExpand(fid){ if(EXPANDED.has(fid))EXPANDED.delete(fid); else EXPANDED.add(fid); render(); autosave(); }
+function expandAll(){ EXPANDED=new Set(allSubFids(ROOT,"",[])); render(); autosave(); }
+function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); render(); autosave(); }
+/* the ⤢/⤡/＋ button on a box (id here is the BOX key = fid in display, plain id when collapsed) */
+function boxExpandBtn(id){
+  const b=BOX[id]; if(!b)return; const has=(b._hasSub!==undefined?b._hasSub:!!b.sub);
+  if(editMode){ if(!has){ (ROOT.BOX[id]||b).sub=newSub(); commit(); layoutBoxes(); } return; }  // edit: create a stub sub
+  if(has) toggleExpand(id);
 }
 
 const stage=document.getElementById("stage"), gridSvg=document.getElementById("grid"), wiresEl=document.getElementById("wires");
@@ -450,7 +496,7 @@ function buildBoxes(){
     el.className="box"+(b.cls?(" "+b.cls):""); el.id="box-"+id; el.dataset.id=id; el.tabIndex=0;
     el.innerHTML=`<div class="n"></div>`+`<div class="s"></div>`;
     const exp=document.createElement("button"); exp.className="boxexp"; exp.type="button";
-    exp.addEventListener("click",e=>{e.stopPropagation();enterBox(id);});
+    exp.addEventListener("click",e=>{e.stopPropagation();boxExpandBtn(id);});
     bindStart(exp,e=>{e.stopPropagation();});   // don't start a move/resize from the expand button
     el.appendChild(exp);
     stage.appendChild(el); boxEls[id]=el;
@@ -464,10 +510,15 @@ function layoutBoxes(){
     el.querySelector(".n").textContent=b.n; el.querySelector(".s").textContent=b.s||"";
     el.querySelector(".s").style.display=b.s?"":"none";
     el.title=b.n+(b.s?" — "+b.s:"");
-    const has=!!b.sub, exp=el.querySelector(".boxexp");
-    el.classList.toggle("hassub",has);
-    if(exp){ exp.style.display=(has||editMode)?"flex":"none";
-      exp.textContent=has?"⤢":"＋"; exp.title=has?"Enter sub-diagram":"Create sub-diagram"; }
+    const has=(b._hasSub!==undefined?b._hasSub:!!b.sub), isC=!!b._container, exp=el.querySelector(".boxexp");
+    el.classList.toggle("container",isC);
+    el.classList.toggle("hassub",has&&!isC);
+    el.style.zIndex = 2 + (b._depth||0)*2;               // children sit above their container
+    el.querySelector(".s").style.display=(b.s&&!isC)?"":"none";   // container shows title only
+    if(exp){
+      if(editMode){ exp.style.display=has?"none":"flex"; exp.textContent="＋"; exp.title="Create a sub-canvas"; }
+      else { exp.style.display=has?"flex":"none"; exp.textContent=isC?"⤡":"⤢"; exp.title=isC?"Collapse":"Expand in place"; }
+    }
   }
 }
 
@@ -481,7 +532,8 @@ function select(id){
   // Highlight/dim is a VIEW-mode focus cue; in edit mode keep every box fully visible
   // (dimming others to opacity .28 made them look like they vanish while arranging).
   for(const bid in boxEls){const el=boxEls[bid];
-    el.classList.toggle("active",!editMode&&bid===id);el.classList.toggle("adj",!editMode&&bid!==id&&adj.has(bid));el.classList.toggle("dim",!editMode&&bid!==id&&!adj.has(bid));}
+    const kin=bid===id||bid.indexOf(id+"/")===0||id.indexOf(bid+"/")===0;   // self / ancestor / descendant by fid path — don't dim
+    el.classList.toggle("active",!editMode&&bid===id);el.classList.toggle("adj",!editMode&&bid!==id&&adj.has(bid));el.classList.toggle("dim",!editMode&&!kin&&!adj.has(bid));}
   wireNodes.forEach(w=>{const hot=!editMode&&(w.from===id||w.to===id),dw=!editMode&&!(w.from===id||w.to===id);
     w.path.classList.toggle("hot",hot);w.path.classList.toggle("dimw",dw);
     if(w.label){w.label.classList.toggle("hot",hot);w.label.classList.toggle("dimw",dw);}
@@ -531,7 +583,8 @@ function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); } 
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
-  layoutBoxes();   // show/hide the per-box expand(+) buttons for the new mode
+  if(on&&EXPANDED.size){ EXPANDED.clear(); render(); }   // edit works on the base tree; collapse the view overlay
+  else layoutBoxes();                                     // else just refresh the per-box buttons for the mode
   clearGhosts();
 }
 function setTool(t){tool=t; selBox=null; clearLevers(); clearGhosts();
@@ -756,15 +809,14 @@ function buildDiagram(s){const D=normDiag({grid:undefined});
   D.ZONES=(s.zones||[]).map(z=>({...z}));D.DESC={...(s.desc||{})};D.FLOWS=(s.flows||[]).map(f=>({...f,nodes:(f.nodes||[]).slice()}));
   D.BOX={};for(const id in(s.boxes||{})){const b={...s.boxes[id]};if(b.sub)b.sub=buildDiagram(b.sub);D.BOX[id]=b;}
   return D;}
-function captureState(){return{v:3,root:serializeDiagram(ROOT),nav:NAV.slice()};}
+function captureState(){return{v:4,root:serializeDiagram(ROOT),expanded:[...EXPANDED]};}
 function applyState(st){if(!st)return;
   const src=st.root?st.root:(st.boxes?{grid:st.grid,boxes:st.boxes,wires:st.wires,zones:st.zones}:null);
   if(!src)return;
   ROOT=buildDiagram(src);
-  NAV=(st.nav||[]).slice();
-  let d=ROOT,v=0;for(const id of NAV){if(d.BOX&&d.BOX[id]&&d.BOX[id].sub){d=normDiag(d.BOX[id].sub);v++;}else break;}
-  NAV.length=v;
-  applyPath();}   // re-points the active bindings to the current path and re-renders
+  const valid=new Set(allSubFids(ROOT,"",[]));
+  EXPANDED=new Set((st.expanded||[]).filter(f=>valid.has(f)));   // drop fids whose box/sub is gone
+  render();}
 /* Re-base content to the top-left + right-size the grid. Run when loading a saved
    layout so accumulated pan-growth / left-shifts can never leave content parked
    off-screen (which looks like an empty diagram). */
@@ -877,11 +929,15 @@ try{setInfo(localStorage.getItem(INFOKEY)!=="0");}catch(_){setInfo(true);}
     b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
 
 /* ---- boot ---- */
-sizeStage();renderZones();buildBoxes();routeAndDraw();applyZoom();renderBreadcrumb();
+render();
 try{const saved=localStorage.getItem(LSKEY);if(saved){const s=JSON.parse(saved);
-  if(s.__build===BUILD){applyState(s);if(!NAV.length)normalizeState();}   // only restore a save made against THIS build; normalize only the top level
+  if(s.__build===BUILD){applyState(s);if(!EXPANDED.size)normalizeState();}   // only restore a save made against THIS build; normalize only when collapsed
   else localStorage.removeItem(LSKEY);
 }}catch(err){}
+(function(){const tb=document.querySelector(".toolbar"),hint=tb.querySelector(".hint");   // Expand-all / Collapse-all
+  const mk=(t,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.borderColor="#8fbce6aa";b.style.color="#9ecbff";
+    b.addEventListener("click",e=>{e.stopPropagation();fn();});tb.insertBefore(b,hint||null);};
+  mk("⤢ Expand all",expandAll); mk("⤡ Collapse all",collapseAll);})();
 histInit();
 </script>
 </body>

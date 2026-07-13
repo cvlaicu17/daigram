@@ -22,9 +22,11 @@ visual editor.
   - **Pan / infinite canvas** — drag empty grid; the grid grows as you pan toward any edge
   - **Undo / Redo** (buttons or ⌘/Ctrl+Z, ⌘/Ctrl+⇧Z)
   - **Copy config** — emits the `GRID`/`BOX`/`W` literals back out
-- **Nested / expandable boxes** — a box can carry its own canvas (`sub`). Click the **⤢** button on a
-  box to expand into it; a **breadcrumb bar** (`◂ Back · ⌂ Root › … › …`) brings you back. Recursive to
-  any depth. In edit mode a **＋** button on any box creates a sub-canvas on demand.
+- **Nested / inline-expandable boxes** — a box can carry its own canvas (`sub`). Click the **⤢** button
+  to **expand it in place**: the box enlarges to show its contents at full size and pushes the other
+  boxes aside ("insert space"). Multiple boxes open at once, recursively — **⤢ Expand all** shows the
+  whole hierarchy on one canvas; **⤡** collapses. Expansion is a view overlay (the base tree stays
+  editable in Edit mode); the flattened display reuses the same router/zoom/pan.
 - **Zoom** (+/−, Fit), a **details pane**, named **Flow** highlight buttons, **zones** (grouping rectangles).
 - **Persistence** — autosaves to `localStorage`, plus Export/Import JSON. A build stamp
   means a newer copy of the file ignores stale saved layouts.
