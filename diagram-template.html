@@ -311,7 +311,7 @@ function layoutLevel(D, prefix, depth){
   let boxes=[], wires=[], zones=[];
   for(const id in eff){ const e=eff[id];
     boxes.push({fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
-      n:e.box.n,s:e.box.s,cls:e.box.cls,desc:D.DESC[id]});
+      n:e.box.n,s:e.box.s,cls:e.box.cls,desc:D.DESC[id],_basebox:e.box,_diag:D});   // back-refs for editing the model
     if(e.container){ const oc=e.col+NEST_M, orow=e.row+NEST_HEAD+NEST_M;
       for(const cb of e._child.boxes) boxes.push({...cb, col:cb.col+oc, row:cb.row+orow});
       for(const w of e._child.wires) wires.push(w);
@@ -329,7 +329,9 @@ function layoutLevel(D, prefix, depth){
 function buildDisplay(){
   const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
   for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
-    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid}; if(b.desc)Dd[b.fid]=b.desc; }
+    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,
+    _base:b._basebox,_diag:b._diag,_ox:(b.col+M)-b._basebox.col,_oy:(b.row+M)-b._basebox.row};   // exact display→base: base = display − _o
+    if(b.desc)Dd[b.fid]=b.desc; }
   for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style,_srcW:w._srcW,_srcI:w._srcI});
   for(const z of L.zones) Zd.push({col:z.col+M,row:z.row+M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
   return {GRID:{cols:Math.max(12,L.w+3*M),rows:Math.max(8,L.h+3*M),cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
@@ -630,13 +632,19 @@ function beginDrag(e,onMove,onEnd){
   }
 }
 function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,cw:b.cw,ch:b.ch};
+  // expanded: b is a display-overlay box — collide vs same-level siblings and commit to the BASE box.
+  // collapsed: b IS the live ROOT box — original cellsFree behaviour, edits already persist.
+  const expanded=EXPANDED.size>0, base=expanded?(b._base||rootBoxByFid(id)):null, diag=b._diag, ox=b._ox||0, oy=b._oy||0;
+  const free=(c,r,cw,ch)=> expanded ? (!!diag&&siblingFree(diag,c,r,cw,ch,id)) : cellsFree(c,r,cw,ch,id);
   beginDrag(e,ev=>{const[c,r]=evCell(ev);let n={...orig};
     if(dir.indexOf("e")>=0)n.cw=Math.max(1,c-n.col+1);
     if(dir.indexOf("s")>=0)n.ch=Math.max(1,r-n.row+1);
     if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-1);n.cw=right-n.col;}
     if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-1);n.ch=bot-n.row;}
-    if(cellsFree(n.col,n.row,n.cw,n.ch,id)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
-    ()=>commit());
+    if(free(n.col,n.row,n.cw,n.ch)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
+    ()=>{ if(expanded&&base){ base.col=Math.max(0,b.col-ox); base.row=Math.max(0,b.row-oy); base.cw=b.cw; base.ch=b.ch;
+            renderKeepView(); reselect(id); }
+          commit(); });
 }
 
 /* -- box create (drag over cells) -- */
@@ -715,6 +723,16 @@ function dropContainerAt(c,r,dragFid){ let best=null,bd=-1;
     if(c>=b.col&&c<b.col+b.cw&&r>=b.row&&r<b.row+b.ch){ const d=b._depth||0; if(d>bd){bd=d;best=fid;} } }
   return best; }
 function highlightDrop(fid){ for(const k in boxEls) boxEls[k].classList.toggle("droptarget",k===fid); }
+// Collision against SAME-LEVEL siblings only (same owning diagram) — so a box never "collides" with its
+// own ancestor container or its own children (which live at other levels). Rects are in display space;
+// same-level boxes share the same display offset, so display-space overlap == base-space overlap.
+function siblingFree(diag,col,row,cw,ch,exceptId){ if(col<0||row<0)return false;
+  for(const k in BOX){ if(k===exceptId)continue; const o=BOX[k]; if(o._diag!==diag)continue;
+    if(col<o.col+o.cw&&col+cw>o.col&&row<o.row+o.ch&&row+ch>o.row)return false; } return true; }
+// Re-render the overlay from the (mutated) base model WITHOUT moving the viewport — editing must never pan.
+function renderKeepView(){ const w=stageWrap,sl=w.scrollLeft,st=w.scrollTop,f=fitMode; fitMode=false; render(); fitMode=f; w.scrollLeft=sl; w.scrollTop=st; }
+// Restore selection + resize handles after an edit-triggered render (render() clears them).
+function reselect(id){ if(!BOX[id])return; selBox=id; for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id); }
 // Remove every wire (at any level) that crosses the boundary of the subtree rooted at fid — i.e. exactly
 // one endpoint is inside the moved subtree. Those become cross-level after the move; only intra-level allowed.
 function pruneSubtreeCrossings(fid){ const inSub=f=>f===fid||f.indexOf(fid+"/")===0;
@@ -737,7 +755,7 @@ function reparentInto(oldFid,targetFid,dropC,dropR){
   if(desc){tb.sub.DESC=tb.sub.DESC||{}; tb.sub.DESC[nid]=desc;}
   const newFid=targetFid+"/"+nid, re=new Set();                                 // remap expanded state for the moved subtree
   EXPANDED.forEach(f=>{ if(f===oldFid)re.add(newFid); else if(f.indexOf(oldFid+"/")===0)re.add(newFid+f.slice(oldFid.length)); else re.add(f); });
-  EXPANDED=re; selBox=null; render(); commit();
+  EXPANDED=re; renderKeepView(); reselect(newFid); commit();          // keep the view put + reselect the moved box
 }
 function startTextEdit(id){
   if(!editMode)return; const el=boxEls[id]; if(!el)return;
@@ -779,15 +797,23 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
       ()=>{dragging=false;commit();});
     return;
   }
-  // expanded: free drag (can cross container borders); drop re-parents into the container under the box's top-left.
-  let dropFid=null, lc=orig.col, lr=orig.row;
+  // expanded: b is a display-overlay box. Free-drag for feedback; on drop either (a) re-parent, when the
+  // box's CENTRE crosses into a container that isn't its current parent, or (b) move in place within its
+  // own level — mapping display→base exactly (base = display − _o) and colliding vs same-level siblings only.
+  const curParent=id.split("/").slice(0,-1).join("/");
+  const base=b._base||rootBoxByFid(id), diag=b._diag, ox=b._ox||0, oy=b._oy||0;
+  let dropFid=curParent, lc=orig.col, lr=orig.row;
   beginDrag(e,ev=>{const[c,r]=evCell(ev); lc=orig.col+(c-c0); lr=orig.row+(r-r0);
       if(lc!==b.col||lr!==b.row)moved=true;
       b.col=lc; b.row=lr; layoutBoxes(); showLevers(id);
-      dropFid=dropContainerAt(lc,lr,id); highlightDrop(dropFid); },
+      dropFid=dropContainerAt(lc+b.cw/2, lr+b.ch/2, id);               // container under the box CENTRE
+      highlightDrop(dropFid&&dropFid!==curParent?dropFid:null); },     // ring only a *different* target (= re-parent)
     ()=>{dragging=false; highlightDrop(null);
-      if(!moved)return;                                                // plain click/tap → leave selection + double-tap alone
-      if(dropFid) reparentInto(id,dropFid,lc,lr); else render(); });   // dropped outside any container → snap back
+      if(!moved)return;                                                // plain click/tap → keep selection + double-tap
+      if(dropFid&&dropFid!==curParent){ reparentInto(id,dropFid,lc,lr); return; }   // crossed into another container
+      if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box exactly
+        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); renderKeepView(); reselect(id); commit(); }
+      else renderKeepView(); });                                       // overlap / no target → snap back to base
 }
 function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
   buildBoxes();routeAndDraw();clearLevers();reset();commit();}
