@@ -701,6 +701,7 @@ let editingText=null;
 function rootBoxByFid(fid){ const p=String(fid).split("/"); let b=ROOT.BOX[p[0]];
   for(let i=1;i<p.length&&b;i++){ b=(b.sub&&b.sub.BOX)?b.sub.BOX[p[i]]:null; } return b||null; }
 function setBoxName(fid,name){ const rb=rootBoxByFid(fid); if(rb)rb.n=name; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].n=name; }
+function setBoxSub(fid,sub){ const rb=rootBoxByFid(fid); if(rb)rb.s=sub; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].s=sub; }
 function startTextEdit(id){
   if(!editMode)return; const el=boxEls[id]; if(!el)return;
   clearLevers(); editingText=id;
@@ -779,7 +780,7 @@ function fillEditFields(id){const b=BOX[id];if(!b)return;
   document.getElementById("ef-cls").value=(b.cls||"").replace("multi","").trim()||"";
 }
 document.getElementById("ef-n").addEventListener("input",e=>{if(selBox){setBoxName(selBox,e.target.value);layoutBoxes();}});
-document.getElementById("ef-s").addEventListener("input",e=>{if(selBox){BOX[selBox].s=e.target.value;layoutBoxes();}});
+document.getElementById("ef-s").addEventListener("input",e=>{if(selBox){setBoxSub(selBox,e.target.value);layoutBoxes();}});
 document.getElementById("ef-n").addEventListener("change",e=>{if(selBox)commit();});
 document.getElementById("ef-s").addEventListener("change",e=>{if(selBox)commit();});
 document.getElementById("ef-cls").addEventListener("change",e=>{if(selBox){BOX[selBox].cls=e.target.value;buildBoxes();routeAndDraw();showLevers(selBox);commit();}});
