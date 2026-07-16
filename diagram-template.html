@@ -172,6 +172,7 @@
     <button id="btnSave">Save</button>
     <button id="btnReset">Reset</button>
     <button id="btnExport">Export ⤓</button>
+    <button id="btnSaveFile" title="Write this layout back to an .html file (Chrome/Edge; else downloads)">Save to file ⤓</button>
     <button id="btnImport">Import ⤒</button>
     <input type="file" id="fileImport" accept="application/json" style="display:none">
     <span class="zoomgrp">
@@ -219,6 +220,7 @@
 "use strict";
 const SVGNS="http://www.w3.org/2000/svg";
 let BUILD="dev";   // build_pipeline.py stamps a unique value per deploy, so a redeploy ignores stale saved layouts
+const HTML_SRC="<!DOCTYPE html>\n"+document.documentElement.outerHTML;   // pristine page source (captured before any dynamic DOM) — used by "Save to file"
 
 /* ============================ CONFIG (edit this) ============================ */
 let GRID={cols:18, rows:11, cell:64, gap:5};
@@ -1017,6 +1019,32 @@ document.getElementById("btnExport").addEventListener("click",e=>{e.stopPropagat
 document.getElementById("btnImport").addEventListener("click",e=>{e.stopPropagation();document.getElementById("fileImport").click();});
 document.getElementById("fileImport").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
   rd.onload=()=>{try{applyState(JSON.parse(rd.result));normalizeState();histInit();autosave();}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);e.target.value="";});
+/* Save to file: write this layout back to an .html (current state baked into the CONFIG) so reopening
+   the file shows the layout with NO localStorage. Chrome/Edge use the File System Access API (one
+   file-picker grant, then one-click re-saves to the same file); other browsers fall back to a download. */
+let _saveHandle=null;
+function buildSaveHtml(){
+  const cfg="let GRID="+JSON.stringify(ROOT.GRID)+";\n"
+          +"let BOX="+JSON.stringify(ROOT.BOX)+";\n"
+          +"let W="+JSON.stringify(ROOT.W)+";\n"
+          +"let ZONES="+JSON.stringify(ROOT.ZONES)+";\n"
+          +"let DESC="+JSON.stringify(ROOT.DESC)+";\n"
+          +"let FLOWS="+JSON.stringify(ROOT.FLOWS)+";\n";
+  return HTML_SRC.replace(/let GRID=[\s\S]*?\nlet ROOT=\{GRID/, cfg+"let ROOT={GRID");   // splice the fresh CONFIG into the pristine source
+}
+async function saveToFile(btn){
+  const html=buildSaveHtml(), fname=(document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()||"diagram")+".html";
+  if(window.showSaveFilePicker){
+    try{
+      if(!_saveHandle) _saveHandle=await window.showSaveFilePicker({suggestedName:fname,types:[{description:"HTML",accept:{"text/html":[".html"]}}]});
+      const w=await _saveHandle.createWritable(); await w.write(html); await w.close();
+      flash(btn,"Saved to file ✓"); return;
+    }catch(err){ if(err&&err.name==="AbortError")return; _saveHandle=null; }   // cancelled → stop; blocked (e.g. file://) → fall back to download
+  }
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([html],{type:"text/html"}));a.download=fname;a.click();
+  flash(btn,"Downloaded ✓");
+}
+(function(){const b=document.getElementById("btnSaveFile"); if(b)b.addEventListener("click",e=>{e.stopPropagation();saveToFile(b);});})();
 document.getElementById("btnCopyCfg").addEventListener("click",e=>{e.stopPropagation();
   const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
   navigator.clipboard.writeText(js).then(()=>flash(e.target,"Copied ✓"),()=>{prompt("Copy config:",js);});});
