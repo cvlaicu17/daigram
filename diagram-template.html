@@ -913,7 +913,7 @@ function maybeGrow(){
 stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
 function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
 const bSave=document.getElementById("btnSave");
-bSave.addEventListener("click",e=>{e.stopPropagation();try{localStorage.setItem(LSKEY,JSON.stringify(captureState()));flash(bSave,"Saved ✓");}catch(err){flash(bSave,"⚠ use Export");}});
+bSave.addEventListener("click",e=>{e.stopPropagation();try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));flash(bSave,"Saved ✓");}catch(err){flash(bSave,"⚠ use Export");}});
 document.getElementById("btnReset").addEventListener("click",e=>{e.stopPropagation();try{localStorage.removeItem(LSKEY);}catch(err){}location.reload();});
 document.getElementById("btnExport").addEventListener("click",e=>{e.stopPropagation();const blob=new Blob([JSON.stringify(captureState(),null,1)],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json";a.click();});
