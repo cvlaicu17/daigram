@@ -642,9 +642,8 @@ function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,c
     if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-1);n.cw=right-n.col;}
     if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-1);n.ch=bot-n.row;}
     if(free(n.col,n.row,n.cw,n.ch)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
-    ()=>{ if(expanded&&base){ base.col=Math.max(0,b.col-ox); base.row=Math.max(0,b.row-oy); base.cw=b.cw; base.ch=b.ch;
-            renderKeepView(); reselect(id); }
-          commit(); });
+    ()=>{ if(expanded&&base){ base.col=Math.max(0,b.col-ox); base.row=Math.max(0,b.row-oy); base.cw=b.cw; base.ch=b.ch; }
+          commit(); });   // FROZEN in edit mode: keep the on-screen frame (no re-project); auto-scale re-applies on exit (setMode → render)
 }
 
 /* -- box create (drag over cells) -- */
@@ -811,9 +810,9 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
     ()=>{dragging=false; highlightDrop(null);
       if(!moved)return;                                                // plain click/tap → keep selection + double-tap
       if(dropFid&&dropFid!==curParent){ reparentInto(id,dropFid,lc,lr); return; }   // crossed into another container
-      if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box exactly
-        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); renderKeepView(); reselect(id); commit(); }
-      else renderKeepView(); });                                       // overlap / no target → snap back to base
+      if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box (FROZEN: no re-project)
+        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); commit(); }   // keep the on-screen frame; auto-scale re-applies on exit Edit mode
+      else { b.col=orig.col; b.row=orig.row; layoutBoxes(); showLevers(id); routeAndDraw(); } });   // overlap → snap back in place (still frozen)
 }
 function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
   buildBoxes();routeAndDraw();clearLevers();reset();commit();}
