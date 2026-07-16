@@ -148,6 +148,7 @@
   .box.container.blue{border-color:#58a6ff88;background:#0d20302e}
   .box.container.red{border-color:#f8514988;background:#2a12102e}
   .box.container:hover{box-shadow:0 0 0 1.5px #58a6ff66}
+  .box.droptarget{box-shadow:0 0 0 3px #2dd4bf !important}   /* re-parent drop target while dragging */
   .box.container>.boxexp{background:#161b22e6}
   @media (pointer:coarse){.box .boxexp{width:26px;height:26px;font-size:14px}}
   #crumbBar{display:none;margin-top:8px;gap:6px;align-items:center;flex-wrap:wrap}
@@ -703,6 +704,41 @@ function rootBoxByFid(fid){ const p=String(fid).split("/"); let b=ROOT.BOX[p[0]]
 function setBoxName(fid,name){ const rb=rootBoxByFid(fid); if(rb)rb.n=name; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].n=name; }
 function setBoxSub(fid,sub){ const rb=rootBoxByFid(fid); if(rb)rb.s=sub; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].s=sub; }
 function setBoxCls(fid,cls){ const rb=rootBoxByFid(fid); if(rb)rb.cls=cls; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].cls=cls; }
+// ---- drag-to-reparent (move a box into an expanded container, any level) ----
+// The diagram (ROOT or a sub) that directly holds fid, plus the box's local id.
+function parentDiagramOf(fid){ const p=String(fid).split("/"); const id=p.pop();
+  if(!p.length) return {diag:ROOT,id}; const pb=rootBoxByFid(p.join("/")); return {diag:(pb&&pb.sub)||null,id}; }
+// Innermost expanded container whose display rect contains (c,r), excluding the dragged box + its subtree.
+function dropContainerAt(c,r,dragFid){ let best=null,bd=-1;
+  for(const fid in BOX){ const b=BOX[fid]; if(!b._container)continue;
+    if(fid===dragFid||fid.indexOf(dragFid+"/")===0)continue;
+    if(c>=b.col&&c<b.col+b.cw&&r>=b.row&&r<b.row+b.ch){ const d=b._depth||0; if(d>bd){bd=d;best=fid;} } }
+  return best; }
+function highlightDrop(fid){ for(const k in boxEls) boxEls[k].classList.toggle("droptarget",k===fid); }
+// Remove every wire (at any level) that crosses the boundary of the subtree rooted at fid — i.e. exactly
+// one endpoint is inside the moved subtree. Those become cross-level after the move; only intra-level allowed.
+function pruneSubtreeCrossings(fid){ const inSub=f=>f===fid||f.indexOf(fid+"/")===0;
+  (function walk(D,pre){ if(D&&D.W) for(let i=D.W.length-1;i>=0;i--){
+    const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)!==inSub(t))D.W.splice(i,1); }
+    if(D&&D.BOX) for(const k in D.BOX){ const b=D.BOX[k]; if(b.sub)walk(b.sub,pre?pre+"/"+k:k); } })(ROOT,""); }
+// Re-parent the box at oldFid into the container targetFid, placing it at the display cell (dropC,dropR).
+function reparentInto(oldFid,targetFid,dropC,dropR){
+  if(targetFid===oldFid||targetFid.indexOf(oldFid+"/")===0){render();return;}   // no drop into self/descendant
+  const src=parentDiagramOf(oldFid), tb=rootBoxByFid(targetFid);
+  if(!src.diag||!tb){render();return;} const box=src.diag.BOX[src.id]; if(!box){render();return;}
+  if(!tb.sub)tb.sub=newSub();
+  const td=BOX[targetFid], lc=Math.max(0,dropC-(td.col+NEST_M)), lr=Math.max(0,dropR-(td.row+NEST_HEAD+NEST_M));
+  if(src.diag===tb.sub){ box.col=lc; box.row=lr; render(); commit(); return; }  // same container: reposition, keep wires
+  const desc=src.diag.DESC&&src.diag.DESC[src.id];
+  delete src.diag.BOX[src.id]; if(src.diag.DESC)delete src.diag.DESC[src.id];
+  pruneSubtreeCrossings(oldFid);                                                // only intra-level wires survive a level change
+  let nid=src.id; while(tb.sub.BOX[nid])nid+="_";
+  box.col=lc; box.row=lr; tb.sub.BOX[nid]=box;
+  if(desc){tb.sub.DESC=tb.sub.DESC||{}; tb.sub.DESC[nid]=desc;}
+  const newFid=targetFid+"/"+nid, re=new Set();                                 // remap expanded state for the moved subtree
+  EXPANDED.forEach(f=>{ if(f===oldFid)re.add(newFid); else if(f.indexOf(oldFid+"/")===0)re.add(newFid+f.slice(oldFid.length)); else re.add(f); });
+  EXPANDED=re; selBox=null; render(); commit();
+}
 function startTextEdit(id){
   if(!editMode)return; const el=boxEls[id]; if(!el)return;
   clearLevers(); editingText=id;
@@ -736,10 +772,22 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
   // Select on pointerdown: the stage pointer-capture (beginDrag) retargets the post-pointerup
   // click to the stage, so the box click never fires — do the visual selection here instead.
   for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id);
-  beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
-    if(nc!==b.col||nr!==b.row)moved=true;
-    if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
-    ()=>{dragging=false;commit();});
+  if(EXPANDED.size===0){                                    // collapsed: in-place move on ROOT (persists directly)
+    beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
+      if(nc!==b.col||nr!==b.row)moved=true;
+      if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
+      ()=>{dragging=false;commit();});
+    return;
+  }
+  // expanded: free drag (can cross container borders); drop re-parents into the container under the box's top-left.
+  let dropFid=null, lc=orig.col, lr=orig.row;
+  beginDrag(e,ev=>{const[c,r]=evCell(ev); lc=orig.col+(c-c0); lr=orig.row+(r-r0);
+      if(lc!==b.col||lr!==b.row)moved=true;
+      b.col=lc; b.row=lr; layoutBoxes(); showLevers(id);
+      dropFid=dropContainerAt(lc,lr,id); highlightDrop(dropFid); },
+    ()=>{dragging=false; highlightDrop(null);
+      if(!moved)return;                                                // plain click/tap → leave selection + double-tap alone
+      if(dropFid) reparentInto(id,dropFid,lc,lr); else render(); });   // dropped outside any container → snap back
 }
 function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
   buildBoxes();routeAndDraw();clearLevers();reset();commit();}
