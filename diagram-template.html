@@ -326,22 +326,54 @@ function layoutLevel(D, prefix, depth){
   boxes.forEach(b=>{b.col-=minC;b.row-=minR;}); zones.forEach(z=>{z.col-=minC;z.row-=minR;});
   return {boxes,wires,zones,w:maxC-minC,h:maxR-minR};
 }
-function buildDisplay(){
-  const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
-  for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
-    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,
-    _base:b._basebox,_diag:b._diag,_ox:(b.col+M)-b._basebox.col,_oy:(b.row+M)-b._basebox.row};   // exact display→base: base = display − _o
-    if(b.desc)Dd[b.fid]=b.desc; }
-  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style,_srcW:w._srcW,_srcI:w._srcI});
-  for(const z of L.zones) Zd.push({col:z.col+M,row:z.row+M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
-  return {GRID:{cols:Math.max(12,L.w+3*M),rows:Math.max(8,L.h+3*M),cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
-          BOX:BOXd, W:Wd, ZONES:Zd, DESC:Dd, FLOWS:ROOT.FLOWS};
+/* ===================== DISPLAY PROJECTION — absolute "root space" =====================
+   ROOT stores every box at its ABSOLUTE position/size in the fully-expanded space (see
+   absolutizeTree). computeDisplay projects it for the current EXPANDED set: boxes under a
+   collapsed ancestor are hidden; a collapsed container shrinks to its placeholder (pw/ph);
+   same-level siblings to the right/below a collapsed container shift INWARD to reclaim the
+   freed span (the reversible dual of layoutLevel's insert-space reflow, L307-310). An
+   EXPANDED container keeps its stored size — so moving a child never resizes it and editing
+   is stable. Fully expanded ⇒ every shift is 0 ⇒ display == absolute + DISP_M (identity). */
+const DISP_M=2;
+function displayLevel(D,prefix,depth,accX,accY,out){
+  D=normDiag(D); const ids=Object.keys(D.BOX);
+  const fd={};                                                  // footprint delta of each box at THIS level
+  for(const id of ids){ const b=D.BOX[id];
+    fd[id]=(b.sub&&!EXPANDED.has(prefix+id))?[b.cw-(b.pw??b.cw), b.ch-(b.ph??b.ch)]:[0,0]; }
+  const shiftAt=(col,row)=>{ let sX=0,sY=0;                     // reclaim from collapsed siblings up/left of (col,row)
+    for(const oid of ids){ const o=D.BOX[oid];
+      if(fd[oid][0]&&(o.col+o.cw)<=col)sX+=fd[oid][0];
+      if(fd[oid][1]&&(o.row+o.ch)<=row)sY+=fd[oid][1]; }
+    return [sX,sY]; };
+  for(const id of ids){ const b=D.BOX[id], fid=prefix+id;
+    const s=shiftAt(b.col,b.row), totX=accX+s[0], totY=accY+s[1];
+    const collapsed=b.sub&&!EXPANDED.has(fid), expanded=b.sub&&EXPANDED.has(fid);
+    out.BOX[fid]={n:b.n,s:b.s,cls:b.cls, col:b.col-totX+DISP_M, row:b.row-totY+DISP_M,
+      cw:collapsed?(b.pw??b.cw):b.cw, ch:collapsed?(b.ph??b.ch):b.ch,
+      _depth:depth,_container:expanded,_hasSub:!!b.sub,_fid:fid,_base:b,_diag:D,_ox:DISP_M-totX,_oy:DISP_M-totY};
+    if(D.DESC[id])out.DESC[fid]=D.DESC[id];
+    out.shift[fid]=[totX,totY];
+    if(expanded)displayLevel(b.sub,fid+"/",depth+1,totX,totY,out);   // descendants translate with the container
+  }
+  for(let i=0;i<D.W.length;i++){ const w=D.W[i], from=prefix+w.from, to=prefix+w.to;
+    if(out.BOX[from]&&out.BOX[to]){ const sh=out.shift[from]||[accX,accY];
+      out.W.push({from,to,label:w.label,style:w.style,
+        path:w.path?w.path.map(p=>[p[0]-sh[0]+DISP_M,p[1]-sh[1]+DISP_M]):undefined,_srcW:D.W,_srcI:i}); } }
+  for(const z of D.ZONES){ const s=shiftAt(z.col,z.row);
+    out.ZONES.push({col:z.col-(accX+s[0])+DISP_M,row:z.row-(accY+s[1])+DISP_M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind}); }
 }
-/* render(): collapsed -> ROOT live (editable); expanded -> flattened display (view overlay). */
+function computeDisplay(){
+  const out={BOX:{},W:[],ZONES:[],DESC:{},shift:{}};
+  displayLevel(ROOT,"",0,0,0,out);
+  let maxC=12,maxR=8;
+  for(const k in out.BOX){ const b=out.BOX[k]; maxC=Math.max(maxC,b.col+b.cw); maxR=Math.max(maxR,b.row+b.ch); }
+  out.ZONES.forEach(z=>{maxC=Math.max(maxC,z.col+z.cw);maxR=Math.max(maxR,z.row+z.ch);});
+  return {GRID:{cols:maxC+DISP_M,rows:maxR+DISP_M,cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
+          BOX:out.BOX,W:out.W,ZONES:out.ZONES,DESC:out.DESC,FLOWS:ROOT.FLOWS};
+}
+/* render(): ONE path for collapsed / partial / full — always the absolute-space projection. */
 function render(){
-  const disp = EXPANDED.size===0
-    ? {GRID:ROOT.GRID,BOX:ROOT.BOX,W:ROOT.W,ZONES:ROOT.ZONES,DESC:ROOT.DESC,FLOWS:ROOT.FLOWS}
-    : buildDisplay();
+  const disp=computeDisplay();
   GRID=disp.GRID; BOX=disp.BOX; W=disp.W; ZONES=disp.ZONES; DESC=disp.DESC; FLOWS=disp.FLOWS;
   selBox=null; pinned=null; pinnedFlow=null;
   sizeStage(); renderZones(); buildBoxes(); routeAndDraw();
@@ -355,7 +387,9 @@ function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); render(); au
 /* the ⤢/⤡/＋ button on a box (id here is the BOX key = fid in display, plain id when collapsed) */
 function boxExpandBtn(id){
   const b=BOX[id]; if(!b)return; const has=(b._hasSub!==undefined?b._hasSub:!!b.sub);
-  if(!has){ if(editMode){ (ROOT.BOX[id]||b).sub=newSub(); commit(); layoutBoxes(); } return; }  // no sub → (edit only) create a stub
+  if(!has){ if(editMode){ const nb=b._base||rootBoxByFid(id)||ROOT.BOX[id]||b;
+    nb.sub=newSub(); nb.pw=(nb.pw??nb.cw); nb.ph=(nb.ph??nb.ch);   // placeholder size = current footprint
+    EXPANDED.add(id); render(); commit(); } return; }              // no sub → (edit only) create a sub-canvas + open it
   toggleExpand(id);   // has a sub → expand / collapse in BOTH view and edit mode
 }
 
@@ -595,7 +629,7 @@ function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); } 
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
-  if(EXPANDED.size) render(); else layoutBoxes();   // keep expansions across the mode toggle; refresh per-box buttons
+  render();   // one render path; keeps EXPANDED, refreshes per-box buttons + grid overlay
   clearGhosts();
 }
 function setTool(t){tool=t; selBox=null; clearLevers(); clearGhosts();
@@ -632,19 +666,24 @@ function beginDrag(e,onMove,onEnd){
   }
 }
 function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,cw:b.cw,ch:b.ch};
-  // expanded: b is a display-overlay box — collide vs same-level siblings and commit to the BASE box.
-  // collapsed: b IS the live ROOT box — original cellsFree behaviour, edits already persist.
-  const expanded=EXPANDED.size>0, base=expanded?(b._base||rootBoxByFid(id)):null, diag=b._diag, ox=b._ox||0, oy=b._oy||0;
-  const free=(c,r,cw,ch)=> expanded ? (!!diag&&siblingFree(diag,c,r,cw,ch,id)) : cellsFree(c,r,cw,ch,id);
+  // b is a display-overlay box. Collide vs same-level siblings; commit to the BASE (canonical) node.
+  const base=b._base||rootBoxByFid(id), diag=b._diag, ox=b._ox||0, oy=b._oy||0;
+  const collapsedContainer=!!(base&&base.sub)&&!b._container;   // a container shown collapsed → edits its placeholder
   beginDrag(e,ev=>{const[c,r]=evCell(ev);let n={...orig};
     if(dir.indexOf("e")>=0)n.cw=Math.max(1,c-n.col+1);
     if(dir.indexOf("s")>=0)n.ch=Math.max(1,r-n.row+1);
     if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-1);n.cw=right-n.col;}
     if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-1);n.ch=bot-n.row;}
-    if(free(n.col,n.row,n.cw,n.ch)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
-    ()=>{ if(expanded&&base){ base.col=Math.max(0,b.col-ox); base.row=Math.max(0,b.row-oy); base.cw=b.cw; base.ch=b.ch;
-            renderKeepView(); reselect(id); }
-          commit(); });
+    if(diag&&siblingFree(diag,n.col,n.row,n.cw,n.ch,id)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
+    ()=>{ if(base){
+        if(collapsedContainer){ base.pw=b.cw; base.ph=b.ch; }              // resize the collapsed placeholder only
+        else { let nc=Math.max(0,b.col-ox), nr=Math.max(0,b.row-oy), cw=b.cw, ch=b.ch;
+          if(base.sub){ const bb=childrenBBox(base);                       // an expanded container can't clip its children
+            if(bb){ nc=Math.min(nc,bb.c0-NEST_M); nr=Math.min(nr,bb.r0-NEST_HEAD-NEST_M);
+              cw=Math.max(cw,bb.c1-nc+NEST_M); ch=Math.max(ch,bb.r1-nr+NEST_M); } }
+          base.col=nc; base.row=nr; base.cw=cw; base.ch=ch; }
+        renderKeepView(); reselect(id); }
+      commit(); });
 }
 
 /* -- box create (drag over cells) -- */
@@ -676,8 +715,17 @@ function stageDown(e){
 }
 let idSeq=0;
 function newId(){let id;do{id="n"+(idSeq++);}while(BOX[id]);return id;}
-function addBox(r){const id=newId();BOX[id]={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
-  buildBoxes();routeAndDraw();setTool("select");pin(id);showLevers(id);commit();}
+function addBox(r){const id=newId();
+  const box={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+  const host=dropContainerAt(r.col+r.cw/2, r.row+r.ch/2, "");   // innermost expanded container under the centre
+  setTool("select");
+  if(host){ const C=BOX[host], hb=rootBoxByFid(host);           // add into that container's sub-canvas
+    box.col=Math.max(0, hb.col+(r.col-C.col)); box.row=Math.max(0, hb.row+(r.row-C.row));   // display→canonical (preserve offset from host)
+    hb.sub=hb.sub||newSub(); let nid=id; while(hb.sub.BOX[nid])nid+="_"; hb.sub.BOX[nid]=box;
+    clampInside(box,hb); render(); reselect(host+"/"+nid); commit(); }
+  else { box.col=Math.max(0,r.col-DISP_M); box.row=Math.max(0,r.row-DISP_M); ROOT.BOX[id]=box;   // top level
+    render(); reselect(id); commit(); }
+}
 
 /* -- box move + click, per element -- */
 let lastTap={id:null,t:0};
@@ -733,25 +781,47 @@ function siblingFree(diag,col,row,cw,ch,exceptId){ if(col<0||row<0)return false;
 function renderKeepView(){ const w=stageWrap,sl=w.scrollLeft,st=w.scrollTop,f=fitMode; fitMode=false; render(); fitMode=f; w.scrollLeft=sl; w.scrollTop=st; }
 // Restore selection + resize handles after an edit-triggered render (render() clears them).
 function reselect(id){ if(!BOX[id])return; selBox=id; for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id); }
+// ---- absolute-space edit helpers ----
+// Translate a base node AND its whole subtree (descendants + their wire paths/zones) by (dCol,dRow).
+// Everything is absolute, so a container move must shift its descendants explicitly.
+function translateNode(node,dCol,dRow){ if((!dCol&&!dRow)||!node)return;
+  node.col+=dCol; node.row+=dRow;
+  if(node.sub){ if(node.sub.W)node.sub.W.forEach(w=>{if(w.path)w.path=w.path.map(p=>[p[0]+dCol,p[1]+dRow]);});
+    if(node.sub.ZONES)node.sub.ZONES.forEach(z=>{z.col+=dCol;z.row+=dRow;});
+    for(const k in node.sub.BOX)translateNode(node.sub.BOX[k],dCol,dRow); } }
+function translateSubtree(fid,dCol,dRow){ translateNode(rootBoxByFid(fid),dCol,dRow); }
+// Min-covering rect (absolute) of a container's direct children — resize can't clip below this.
+function childrenBBox(node){ let c0=Infinity,r0=Infinity,c1=0,r1=0;
+  if(node.sub)for(const k in node.sub.BOX){ const b=node.sub.BOX[k];
+    c0=Math.min(c0,b.col); r0=Math.min(r0,b.row); c1=Math.max(c1,b.col+b.cw); r1=Math.max(r1,b.row+b.ch); }
+  return isFinite(c0)?{c0,r0,c1,r1}:null; }
+// Pull a child (and its subtree) so it sits within the parent container's expanded interior.
+function clampInside(childNode,parentNode){ if(!childNode||!parentNode)return;
+  const il=parentNode.col+NEST_M, ir=parentNode.col+parentNode.cw-NEST_M;
+  const it=parentNode.row+NEST_HEAD+NEST_M, ib=parentNode.row+parentNode.ch-NEST_M;
+  const nc=Math.min(Math.max(childNode.col,il), Math.max(il,ir-childNode.cw));
+  const nr=Math.min(Math.max(childNode.row,it), Math.max(it,ib-childNode.ch));
+  translateNode(childNode, nc-childNode.col, nr-childNode.row); }
 // Remove every wire (at any level) that crosses the boundary of the subtree rooted at fid — i.e. exactly
 // one endpoint is inside the moved subtree. Those become cross-level after the move; only intra-level allowed.
 function pruneSubtreeCrossings(fid){ const inSub=f=>f===fid||f.indexOf(fid+"/")===0;
   (function walk(D,pre){ if(D&&D.W) for(let i=D.W.length-1;i>=0;i--){
     const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)!==inSub(t))D.W.splice(i,1); }
     if(D&&D.BOX) for(const k in D.BOX){ const b=D.BOX[k]; if(b.sub)walk(b.sub,pre?pre+"/"+k:k); } })(ROOT,""); }
-// Re-parent the box at oldFid into the container targetFid, placing it at the display cell (dropC,dropR).
-function reparentInto(oldFid,targetFid,dropC,dropR){
-  if(targetFid===oldFid||targetFid.indexOf(oldFid+"/")===0){render();return;}   // no drop into self/descendant
+// Re-parent the box at oldFid into container targetFid. In absolute space the box is ALREADY at its
+// drop position (startMove moved its subtree there), so this only reassigns the tree parent + clamps
+// it inside the new container's interior — no coordinate remap.
+function reparentInto(oldFid,targetFid){
+  if(targetFid===oldFid||targetFid.indexOf(oldFid+"/")===0){renderKeepView();return;}   // not into self/descendant
   const src=parentDiagramOf(oldFid), tb=rootBoxByFid(targetFid);
-  if(!src.diag||!tb){render();return;} const box=src.diag.BOX[src.id]; if(!box){render();return;}
+  if(!src.diag||!tb){renderKeepView();return;} const box=src.diag.BOX[src.id]; if(!box){renderKeepView();return;}
   if(!tb.sub)tb.sub=newSub();
-  const td=BOX[targetFid], lc=Math.max(0,dropC-(td.col+NEST_M)), lr=Math.max(0,dropR-(td.row+NEST_HEAD+NEST_M));
-  if(src.diag===tb.sub){ box.col=lc; box.row=lr; render(); commit(); return; }  // same container: reposition, keep wires
+  if(src.diag===tb.sub){ clampInside(box,tb); renderKeepView(); reselect(oldFid); commit(); return; }  // same container
   const desc=src.diag.DESC&&src.diag.DESC[src.id];
   delete src.diag.BOX[src.id]; if(src.diag.DESC)delete src.diag.DESC[src.id];
   pruneSubtreeCrossings(oldFid);                                                // only intra-level wires survive a level change
   let nid=src.id; while(tb.sub.BOX[nid])nid+="_";
-  box.col=lc; box.row=lr; tb.sub.BOX[nid]=box;
+  tb.sub.BOX[nid]=box; clampInside(box,tb);                                     // keep its absolute pos, pulled inside
   if(desc){tb.sub.DESC=tb.sub.DESC||{}; tb.sub.DESC[nid]=desc;}
   const newFid=targetFid+"/"+nid, re=new Set();                                 // remap expanded state for the moved subtree
   EXPANDED.forEach(f=>{ if(f===oldFid)re.add(newFid); else if(f.indexOf(oldFid+"/")===0)re.add(newFid+f.slice(oldFid.length)); else re.add(f); });
@@ -790,16 +860,9 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
   // Select on pointerdown: the stage pointer-capture (beginDrag) retargets the post-pointerup
   // click to the stage, so the box click never fires — do the visual selection here instead.
   for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id);
-  if(EXPANDED.size===0){                                    // collapsed: in-place move on ROOT (persists directly)
-    beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
-      if(nc!==b.col||nr!==b.row)moved=true;
-      if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
-      ()=>{dragging=false;commit();});
-    return;
-  }
-  // expanded: b is a display-overlay box. Free-drag for feedback; on drop either (a) re-parent, when the
-  // box's CENTRE crosses into a container that isn't its current parent, or (b) move in place within its
-  // own level — mapping display→base exactly (base = display − _o) and colliding vs same-level siblings only.
+  // b is a display-overlay box (absolute-space projection). Free-drag for feedback; on drop, either
+  // re-parent (when the box's CENTRE crosses into a container that isn't its current parent) or move
+  // in place. Both write the CANONICAL tree: translate the box's whole subtree by the drag delta.
   const curParent=id.split("/").slice(0,-1).join("/");
   const base=b._base||rootBoxByFid(id), diag=b._diag, ox=b._ox||0, oy=b._oy||0;
   let dropFid=curParent, lc=orig.col, lr=orig.row;
@@ -809,16 +872,33 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
       dropFid=dropContainerAt(lc+b.cw/2, lr+b.ch/2, id);               // container under the box CENTRE
       highlightDrop(dropFid&&dropFid!==curParent?dropFid:null); },     // ring only a *different* target (= re-parent)
     ()=>{dragging=false; highlightDrop(null);
-      if(!moved)return;                                                // plain click/tap → keep selection + double-tap
-      if(dropFid&&dropFid!==curParent){ reparentInto(id,dropFid,lc,lr); return; }   // crossed into another container
-      if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box exactly
-        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); renderKeepView(); reselect(id); commit(); }
-      else renderKeepView(); });                                       // overlap / no target → snap back to base
+      if(!moved||!base){ if(!base)renderKeepView(); return; }          // plain click/tap → keep selection + double-tap
+      const nc=Math.max(0,lc-ox), nr=Math.max(0,lr-oy);                // display → canonical (base = display − _o)
+      if(dropFid&&dropFid!==curParent){                                // crossed into another container → re-parent
+        translateSubtree(id, nc-base.col, nr-base.row); reparentInto(id,dropFid); return; }
+      if(diag&&!siblingFree(diag,lc,lr,b.cw,b.ch,id)){renderKeepView();return;}   // overlap a sibling → snap back
+      translateSubtree(id, nc-base.col, nr-base.row);                  // in-level move (a container drags its subtree)
+      const par=curParent?rootBoxByFid(curParent):null; if(par)clampInside(base,par);
+      renderKeepView(); reselect(id); commit(); });
 }
-function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
-  buildBoxes();routeAndDraw();clearLevers();reset();commit();}
+// Remove every wire (any level) with an endpoint inside the subtree rooted at fid.
+function pruneWiresTo(fid){ const inSub=f=>f===fid||f.indexOf(fid+"/")===0;
+  (function walk(D,pre){ if(D&&D.W)for(let i=D.W.length-1;i>=0;i--){ const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)||inSub(t))D.W.splice(i,1); }
+    if(D&&D.BOX)for(const k in D.BOX){ if(D.BOX[k].sub)walk(D.BOX[k].sub,pre?pre+"/"+k:k); } })(ROOT,""); }
+function delBox(id){ const p=parentDiagramOf(id); if(!p.diag||!p.diag.BOX[p.id])return;   // delete from the BASE tree
+  pruneWiresTo(id); delete p.diag.BOX[p.id]; if(p.diag.DESC)delete p.diag.DESC[p.id];
+  EXPANDED=new Set([...EXPANDED].filter(f=>f!==id&&f.indexOf(id+"/")!==0));                // forget expanded fids under it
+  render();clearLevers();reset();commit();}
 
 /* -- arrow draw (drag box→cells→box) -- */
+// Store a new wire in the BASE tree at the common-ancestor level, with from/to expressed relative to
+// that level (bare id for siblings, slash-path for cross-subtree) — mirrors the authored wire format.
+function addWireBase(fromFid,toFid){
+  const fp=String(fromFid).split("/"), tp=String(toFid).split("/");
+  let i=0; while(i<fp.length-1&&i<tp.length-1&&fp[i]===tp[i])i++;   // common-ancestor depth (leaf ids excluded)
+  const anc=fp.slice(0,i).join("/"), D=anc?((rootBoxByFid(anc)||{}).sub):ROOT;
+  if(!D)return; D.W=D.W||[]; D.W.push({from:fp.slice(i).join("/"),to:tp.slice(i).join("/")});   // auto-routed (no path)
+}
 let arrowDraw=null, previewPath=null;
 function startArrow(e,fromId){e.preventDefault();
   arrowDraw={from:fromId,cells:[]};
@@ -827,10 +907,8 @@ function startArrow(e,fromId){e.preventDefault();
     ev=>{const tgt=boxAt(...evCell(ev));
       if(previewPath){previewPath.remove();previewPath=null;}
       let added=false;
-      if(tgt&&tgt!==arrowDraw.from&&arrowDraw.cells.length){
-        // trim cells that are inside either box; keep the free channel
-        const path=arrowDraw.cells.filter(([c,r])=>!ENG.isBox(c,r));
-        W.push({from:arrowDraw.from,to:tgt,path:path.length?path:undefined});routeAndDraw();added=true;
+      if(tgt&&tgt!==arrowDraw.from){
+        addWireBase(arrowDraw.from,tgt); renderKeepView(); added=true;   // persist to the base tree + re-project
       }
       arrowDraw=null;if(added)commit();});
 }
@@ -908,29 +986,45 @@ function buildDiagram(s){const D=normDiag({grid:undefined});
   D.ZONES=(s.zones||[]).map(z=>({...z}));D.DESC={...(s.desc||{})};D.FLOWS=(s.flows||[]).map(f=>({...f,nodes:(f.nodes||[]).slice()}));
   D.BOX={};for(const id in(s.boxes||{})){const b={...s.boxes[id]};if(b.sub)b.sub=buildDiagram(b.sub);D.BOX[id]=b;}
   return D;}
-function captureState(){return{v:4,root:serializeDiagram(ROOT),expanded:[...EXPANDED]};}
+function captureState(){return{v:5,root:serializeDiagram(ROOT),expanded:[...EXPANDED]};}   // v5 = absolute "root space"
 function applyState(st){if(!st)return;
   const src=st.root?st.root:(st.boxes?{grid:st.grid,boxes:st.boxes,wires:st.wires,zones:st.zones}:null);
   if(!src)return;
   ROOT=buildDiagram(src);
+  if(st.v===5){ ROOT.__abs=true; }              // already absolute
+  else { ROOT.__abs=false; absolutizeTree(); }  // v4 nested / legacy flat → migrate to absolute (version is the real gate, BUILD is unstamped in dev)
   const valid=new Set(allSubFids(ROOT,"",[]));
   EXPANDED=new Set((st.expanded||[]).filter(f=>valid.has(f)));   // drop fids whose box/sub is gone
   render();}
-/* Re-base content to the top-left + right-size the grid. Run when loading a saved
-   layout so accumulated pan-growth / left-shifts can never leave content parked
-   off-screen (which looks like an empty diagram). */
-function normalizeState(){
-  const ids=Object.keys(BOX); if(!ids.length)return;
-  let minC=Infinity,minR=Infinity,maxC=-Infinity,maxR=-Infinity;
-  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
-  ids.forEach(id=>{const b=BOX[id];acc(b.col,b.row,b.cw,b.ch);});     // key off the real content (boxes + wires)
-  W.forEach(w=>{if(w.path)w.path.forEach(([c,r])=>acc(c,r,1,1));});
-  const M=2, dc=M-minC, dr=M-minR;
-  if(dc||dr){ids.forEach(id=>{BOX[id].col+=dc;BOX[id].row+=dr;});
-    W.forEach(w=>{if(w.path)w.path=w.path.map(([c,r])=>[c+dc,r+dr]);});
-    ZONES.forEach(z=>{z.col=Math.max(0,z.col+dc);z.row=Math.max(0,z.row+dr);});}
-  GRID.cols=Math.max(12,Math.ceil(maxC+dc+M)); GRID.rows=Math.max(8,Math.ceil(maxR+dr+M));
-  sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();
+/* Migrate a per-level RELATIVE tree (authored CONFIG or a v4 save) to the absolute "root space".
+   Reuses layoutLevel with EVERYTHING expanded — its output IS the current engine's "Expand all"
+   geometry, so migration is faithful by construction. Each container's authored footprint becomes
+   its collapsed placeholder (pw/ph); the grown footprint becomes its stored expanded size. Manual
+   wire paths (relative) are dropped → auto-routed. Idempotent (guarded by ROOT.__abs). */
+function absolutizeTree(){
+  if(ROOT.__abs)return;
+  const savedExp=EXPANDED;
+  EXPANDED=new Set(allSubFids(ROOT,"",[]));                 // fully expand to read the true absolute geometry
+  const L=layoutLevel(ROOT,"",0);
+  let topDC=0,topDR=0,gotTop=false;
+  for(const lb of L.boxes){ const node=lb._basebox; if(!node)continue;
+    if(!gotTop&&lb.depth===0){ topDC=lb.col-node.col; topDR=lb.row-node.row; gotTop=true; }   // uniform top-level shift
+    if(node.sub){ node.pw=(node.pw??node.cw); node.ph=(node.ph??node.ch); }   // authored footprint → collapsed size
+    node.col=lb.col; node.row=lb.row; node.cw=lb.cw; node.ch=lb.ch; }         // grown footprint → expanded size
+  (function clearPaths(D){ if(!D)return; if(D.W)D.W.forEach(w=>{delete w.path;});
+    if(D.BOX)for(const k in D.BOX)if(D.BOX[k].sub)clearPaths(D.BOX[k].sub); })(ROOT);
+  if(ROOT.ZONES)ROOT.ZONES.forEach(z=>{z.col+=topDC;z.row+=topDR;});          // top-level zones share the shift
+  EXPANDED=savedExp; ROOT.__abs=true;
+}
+/* Re-base the whole tree to top-left (min → 0). Used after Import of an arbitrary layout. */
+function normalizeTree(){
+  let minC=Infinity,minR=Infinity;
+  (function scan(D){ for(const k in D.BOX){const b=D.BOX[k]; minC=Math.min(minC,b.col); minR=Math.min(minR,b.row); if(b.sub)scan(b.sub);} })(ROOT);
+  if(ROOT.ZONES)ROOT.ZONES.forEach(z=>{minC=Math.min(minC,z.col);minR=Math.min(minR,z.row);});
+  if(!isFinite(minC))return; const dc=-minC, dr=-minR;
+  if(dc||dr){ for(const k in ROOT.BOX)translateNode(ROOT.BOX[k],dc,dr);
+    if(ROOT.ZONES)ROOT.ZONES.forEach(z=>{z.col+=dc;z.row+=dr;}); }
+  render();
 }
 function autosave(){try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));}catch(err){}}
 
@@ -958,34 +1052,23 @@ document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
 
 /* ---- infinite canvas: grow the grid as you pan toward an edge (edit mode) ---- */
 const GROW_MARGIN=4, GROW_CHUNK=10, GRID_MAX=1500;
-function shiftBW(st,dc,dr){if(!st||!st.boxes)return;   // new-format history ({v:3,root,nav}) is self-contained — skip
-  for(const id in st.boxes){st.boxes[id].col+=dc;st.boxes[id].row+=dr;}
-  if(st.wires)st.wires.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
-  if(st.zones)st.zones.forEach(z=>{z.col+=dc;z.row+=dr;});}
-function gridGrow(growR,growB,dc,dr){                 // growR/B add right/bottom; dc/dr shift content right/down (grow left/top)
-  if(dc||dr){for(const id in BOX){BOX[id].col+=dc;BOX[id].row+=dr;}
-    ZONES.forEach(z=>{z.col+=dc;z.row+=dr;});
-    W.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
-    history.forEach(st=>shiftBW(st,dc,dr));}
-  GRID.cols+=growR+dc; GRID.rows+=growB+dr;
-  history.forEach(st=>{if(st&&st.grid){st.grid.cols+=growR+dc; st.grid.rows+=growB+dr;}});   // flat-format snapshots only
-}
+// Absolute model: the DISPLAY grid is sized to content by computeDisplay every render. To pan into
+// empty space while arranging, grow the grid RIGHT/BOTTOM only (transient until the next render, which
+// re-fits to content). No left/top shift — content coords are absolute and must not move under the user.
+function gridGrow(growR,growB){ GRID.cols+=growR; GRID.rows+=growB; }
 let growQ=false;
 function maybeGrow(){
   if(!editMode||fitMode)return;
   const cell=GRID.cell, w=stageWrap;
   const overX=STAGE_W*zoom>w.clientWidth+1, overY=STAGE_H*zoom>w.clientHeight+1;
   const left=w.scrollLeft/zoom, top=w.scrollTop/zoom, vw=w.clientWidth/zoom, vh=w.clientHeight/zoom;
-  let growR=0,growB=0,dc=0,dr=0;
-  if(overX){ if((left+vw)/cell>GRID.cols-GROW_MARGIN)growR=GROW_CHUNK; if(left/cell<GROW_MARGIN)dc=GROW_CHUNK; }
-  if(overY){ if((top+vh)/cell>GRID.rows-GROW_MARGIN)growB=GROW_CHUNK; if(top/cell<GROW_MARGIN)dr=GROW_CHUNK; }
-  if(GRID.cols+growR+dc>GRID_MAX){growR=0;dc=0;}
-  if(GRID.rows+growB+dr>GRID_MAX){growB=0;dr=0;}
-  if(!growR&&!growB&&!dc&&!dr)return;
-  gridGrow(growR,growB,dc,dr);
-  if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
-  sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
-  if(selBox&&editMode)showLevers(selBox);   // a left/top grow shifts the selected box → move its handles too
+  let growR=0,growB=0;
+  if(overX && (left+vw)/cell>GRID.cols-GROW_MARGIN)growR=GROW_CHUNK;
+  if(overY && (top+vh)/cell>GRID.rows-GROW_MARGIN)growB=GROW_CHUNK;
+  if(GRID.cols+growR>GRID_MAX)growR=0;
+  if(GRID.rows+growB>GRID_MAX)growB=0;
+  if(!growR&&!growB)return;
+  gridGrow(growR,growB); sizeStage(); if(editMode)drawGridOverlay();
 }
 stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
 function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
@@ -996,7 +1079,7 @@ document.getElementById("btnExport").addEventListener("click",e=>{e.stopPropagat
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json";a.click();});
 document.getElementById("btnImport").addEventListener("click",e=>{e.stopPropagation();document.getElementById("fileImport").click();});
 document.getElementById("fileImport").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
-  rd.onload=()=>{try{applyState(JSON.parse(rd.result));normalizeState();histInit();autosave();}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);e.target.value="";});
+  rd.onload=()=>{try{applyState(JSON.parse(rd.result));normalizeTree();histInit();autosave();}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);e.target.value="";});
 document.getElementById("btnCopyCfg").addEventListener("click",e=>{e.stopPropagation();
   const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
   navigator.clipboard.writeText(js).then(()=>flash(e.target,"Copied ✓"),()=>{prompt("Copy config:",js);});});
@@ -1028,9 +1111,10 @@ try{setInfo(localStorage.getItem(INFOKEY)!=="0");}catch(_){setInfo(true);}
     b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
 
 /* ---- boot ---- */
+absolutizeTree();                        // the injected CONFIG is authored per-level RELATIVE → flatten to absolute once
 render();
 try{const saved=localStorage.getItem(LSKEY);if(saved){const s=JSON.parse(saved);
-  if(s.__build===BUILD){applyState(s);if(!EXPANDED.size)normalizeState();}   // only restore a save made against THIS build; normalize only when collapsed
+  if(s.__build===BUILD){applyState(s);}  // applyState migrates v4→absolute by version (the real gate); BUILD stays "dev" in the working tree
   else localStorage.removeItem(LSKEY);
 }}catch(err){}
 (function(){const tb=document.querySelector(".toolbar"),hint=tb.querySelector(".hint");   // Expand-all / Collapse-all
