@@ -675,8 +675,16 @@ function stageDown(e){
 }
 let idSeq=0;
 function newId(){let id;do{id="n"+(idSeq++);}while(BOX[id]);return id;}
-function addBox(r){const id=newId();BOX[id]={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
-  buildBoxes();routeAndDraw();setTool("select");pin(id);showLevers(id);commit();}
+function addBox(r){const id=newId();
+  const box={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+  const host=dropContainerAt(r.col+r.cw/2, r.row+r.ch/2, "");   // expanded container under the drop centre
+  setTool("select");
+  if(host){ const C=BOX[host], hb=rootBoxByFid(host); if(hb){ hb.sub=hb.sub||newSub();   // add into that container's sub (BASE tree)
+      box.col=Math.max(0, r.col-(C.col+NEST_M)); box.row=Math.max(0, r.row-(C.row+NEST_HEAD+NEST_M));   // display → container-local
+      let nid=id; while(hb.sub.BOX[nid])nid+="_"; hb.sub.BOX[nid]=box;
+      renderKeepView(); pin(host+"/"+nid); showLevers(host+"/"+nid); commit(); return; } }
+  ROOT.BOX[id]=box; renderKeepView(); pin(id); showLevers(id); commit();   // top level
+}
 
 /* -- box move + click, per element -- */
 let lastTap={id:null,t:0};
@@ -814,10 +822,25 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
         base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); commit(); }   // keep the on-screen frame; auto-scale re-applies on exit Edit mode
       else { b.col=orig.col; b.row=orig.row; layoutBoxes(); showLevers(id); routeAndDraw(); } });   // overlap → snap back in place (still frozen)
 }
-function delBox(id){delete BOX[id];for(let i=W.length-1;i>=0;i--)if(W[i].from===id||W[i].to===id)W.splice(i,1);
-  buildBoxes();routeAndDraw();clearLevers();reset();commit();}
+function delBox(id){ const p=parentDiagramOf(id); if(!p.diag||!p.diag.BOX[p.id])return;   // delete from the BASE tree (persists)
+  const inSub=f=>f===id||f.indexOf(id+"/")===0;
+  (function walk(D,pre){ if(D&&D.W)for(let i=D.W.length-1;i>=0;i--){ const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)||inSub(t))D.W.splice(i,1); }
+    if(D&&D.BOX)for(const k in D.BOX)if(D.BOX[k].sub)walk(D.BOX[k].sub,pre?pre+"/"+k:k); })(ROOT,"");   // prune base wires touching the subtree
+  delete p.diag.BOX[p.id]; if(p.diag.DESC)delete p.diag.DESC[p.id];
+  EXPANDED=new Set([...EXPANDED].filter(f=>!inSub(f)));                                    // forget expanded fids under it
+  for(const k of Object.keys(BOX))if(inSub(k))delete BOX[k];                              // drop from the frozen display now (no reflow; auto-scale re-applies on exit)
+  for(let i=W.length-1;i>=0;i--){ const w=W[i]; if(inSub(w.from)||inSub(w.to))W.splice(i,1); }
+  buildBoxes();routeAndDraw();clearLevers();reset();commit(); }
 
 /* -- arrow draw (drag box→cells→box) -- */
+// Store a new wire in the BASE tree at the common-ancestor level, with from/to relative to that level
+// (bare id for siblings, slash-path cross-subtree) — mirrors the authored wire format, so it persists.
+function addWireBase(fromFid,toFid){
+  const fp=String(fromFid).split("/"), tp=String(toFid).split("/");
+  let i=0; while(i<fp.length-1&&i<tp.length-1&&fp[i]===tp[i])i++;   // common-ancestor depth (leaf ids excluded)
+  const anc=fp.slice(0,i).join("/"), D=anc?((rootBoxByFid(anc)||{}).sub):ROOT;
+  if(!D)return; D.W=D.W||[]; D.W.push({from:fp.slice(i).join("/"),to:tp.slice(i).join("/")});   // auto-routed (no path)
+}
 let arrowDraw=null, previewPath=null;
 function startArrow(e,fromId){e.preventDefault();
   arrowDraw={from:fromId,cells:[]};
@@ -826,10 +849,8 @@ function startArrow(e,fromId){e.preventDefault();
     ev=>{const tgt=boxAt(...evCell(ev));
       if(previewPath){previewPath.remove();previewPath=null;}
       let added=false;
-      if(tgt&&tgt!==arrowDraw.from&&arrowDraw.cells.length){
-        // trim cells that are inside either box; keep the free channel
-        const path=arrowDraw.cells.filter(([c,r])=>!ENG.isBox(c,r));
-        W.push({from:arrowDraw.from,to:tgt,path:path.length?path:undefined});routeAndDraw();added=true;
+      if(tgt&&tgt!==arrowDraw.from){
+        addWireBase(arrowDraw.from,tgt); renderKeepView(); added=true;   // persist to the base tree + re-project
       }
       arrowDraw=null;if(added)commit();});
 }
