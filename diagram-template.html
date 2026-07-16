@@ -316,7 +316,7 @@ function layoutLevel(D, prefix, depth){
       for(const w of e._child.wires) wires.push(w);
       for(const z of e._child.zones) zones.push({...z, col:z.col+oc, row:z.row+orow});
     } }
-  for(const w of D.W) wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style});
+  for(let wi=0;wi<D.W.length;wi++){ const w=D.W[wi]; wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style, _srcW:D.W, _srcI:wi}); }
   for(const z of D.ZONES) zones.push({col:z.col,row:z.row,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
   let minC=Infinity,minR=Infinity,maxC=0,maxR=0;
   const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
@@ -329,7 +329,7 @@ function buildDisplay(){
   const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
   for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
     _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid}; if(b.desc)Dd[b.fid]=b.desc; }
-  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style});
+  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style,_srcW:w._srcW,_srcI:w._srcI});
   for(const z of L.zones) Zd.push({col:z.col+M,row:z.row+M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
   return {GRID:{cols:Math.max(12,L.w+3*M),rows:Math.max(8,L.h+3*M),cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
           BOX:BOXd, W:Wd, ZONES:Zd, DESC:Dd, FLOWS:ROOT.FLOWS};
@@ -772,7 +772,10 @@ function boxAt(c,r){for(const id in BOX){const b=BOX[id];if(c>=b.col&&c<b.col+b.
 
 /* wire delete via hit paths */
 bindStart(wiresEl,e=>{const t=pt(e),el=document.elementFromPoint(t.clientX,t.clientY);const hit=el&&el.closest&&el.closest("path.hit");if(!hit)return;
-  if(editMode&&tool==="del"){e.stopPropagation();W.splice(+hit.dataset.wi,1);routeAndDraw();commit();}});
+  if(editMode&&tool==="del"){e.stopPropagation();const dw=W[+hit.dataset.wi];
+    if(dw&&dw._srcW){dw._srcW.splice(dw._srcI,1);render();}   // expanded: delete from the source level's W, then rebuild the overlay
+    else{W.splice(+hit.dataset.wi,1);routeAndDraw();}          // collapsed: W is ROOT.W
+    commit();}});
 
 /* ---- edit fields ---- */
 function fillEditFields(id){const b=BOX[id];if(!b)return;
