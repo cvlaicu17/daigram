@@ -179,6 +179,8 @@
     <button id="btnReset">Reset</button>
     <button id="btnExport">Export ⤓</button>
     <button id="btnSaveFile" title="Write this layout back to an .html file (Chrome/Edge; else downloads)">Save to file ⤓</button>
+    <button id="btnRec" title="Recording every user action for debugging — click to pause" style="border-color:#ff7b72aa;color:#ff7b72">⏺ Rec</button>
+    <button id="btnLog" title="Download the recorded action log (JSONL)">Log ⤓</button>
     <button id="btnImport">Import ⤒</button>
     <input type="file" id="fileImport" accept="application/json" style="display:none">
     <span class="zoomgrp">
@@ -351,15 +353,18 @@ function render(){
     ? {GRID:ROOT.GRID,BOX:ROOT.BOX,W:ROOT.W,ZONES:ROOT.ZONES,DESC:ROOT.DESC,FLOWS:ROOT.FLOWS}
     : buildDisplay();
   GRID=disp.GRID; BOX=disp.BOX; W=disp.W; ZONES=disp.ZONES; DESC=disp.DESC; FLOWS=disp.FLOWS;
+  { const exp=EXPANDED.size>0, grown=[];   // engine auto-scale: log the projection (containers grown to fit + re-normalized) at the same level as user actions
+    if(exp)for(const fid in BOX){const b=BOX[fid];if(b._container&&b._base&&(b.cw>b._base.cw||b.ch>b._base.ch))grown.push({fid,base:[b._base.cw,b._base.ch],disp:[b.cw,b.ch]});}
+    if(typeof rec==="function")rec(exp?"autoscale":"render",{cat:"engine",expanded:exp,grid:[GRID.cols,GRID.rows],grown,boxes:recSnap()}); }
   selBox=null; pinned=null; pinnedFlow=null;
   sizeStage(); renderZones(); buildBoxes(); routeAndDraw();
   if(editMode)drawGridOverlay();
   reset(); clearLevers();
   if(fitMode)doFit(); else applyZoom();
 }
-function toggleExpand(fid){ if(EXPANDED.has(fid))EXPANDED.delete(fid); else EXPANDED.add(fid); render(); autosave(); }
-function expandAll(){ EXPANDED=new Set(allSubFids(ROOT,"",[])); render(); autosave(); }
-function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); render(); autosave(); }
+function toggleExpand(fid){ if(EXPANDED.has(fid))EXPANDED.delete(fid); else EXPANDED.add(fid); rec("expand",{fid,on:EXPANDED.has(fid)}); render(); autosave(); }
+function expandAll(){ EXPANDED=new Set(allSubFids(ROOT,"",[])); rec("expandAll"); render(); autosave(); }
+function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); rec("collapseAll"); render(); autosave(); }
 /* the ⤢/⤡/＋ button on a box (id here is the BOX key = fid in display, plain id when collapsed) */
 function boxExpandBtn(id){
   const b=BOX[id]; if(!b)return; const has=(b._hasSub!==undefined?b._hasSub:!!b.sub);
@@ -576,7 +581,7 @@ function reset(){
   clearLevers();
 }
 let pinned=null,pinnedFlow=null;
-function pin(id){pinnedFlow=null;pinned=id;select(id);for(const bid in boxEls)boxEls[bid].classList.toggle("pinned",bid===id);}
+function pin(id){pinnedFlow=null;pinned=id;select(id);for(const bid in boxEls)boxEls[bid].classList.toggle("pinned",bid===id);rec("select",{fid:id});}
 
 /* ============================ EDIT MODE ============================ */
 let editMode=false, tool="select", selBox=null;
@@ -602,6 +607,7 @@ function cellsFree(col,row,cw,ch,exceptId){
 function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); }  // CSS-background grid (see .stage rule)
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
+  rec("mode",{on});
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
   if(EXPANDED.size) render(); else layoutBoxes();   // keep expansions across the mode toggle; refresh per-box buttons
   clearGhosts();
@@ -914,7 +920,7 @@ const zLabel=document.getElementById("zoomLabel"),bFit=document.getElementById("
 function applyZoom(){stage.style.transform="scale("+zoom+")";stageSizer.style.width=(STAGE_W*zoom)+"px";stageSizer.style.height=(STAGE_H*zoom)+"px";
   if(zLabel)zLabel.textContent=Math.round(zoom*100)+"%";if(bFit)bFit.classList.toggle("on",fitMode);}
 function computeFit(){const aw=stageWrap.clientWidth-zPad,ah=stageWrap.clientHeight-zPad;return Math.max(0.1,Math.min(aw/STAGE_W,ah/STAGE_H));}
-function setZoom(z,fromFit){if(!fromFit)fitMode=false;zoom=Math.max(0.1,Math.min(3,z));applyZoom();}
+function setZoom(z,fromFit){if(!fromFit)fitMode=false;zoom=Math.max(0.1,Math.min(3,z));applyZoom();if(!fromFit)rec("zoom",{zoom});}
 function doFit(){zoom=computeFit();applyZoom();}
 function toggleFit(){fitMode=!fitMode;if(fitMode)doFit();else applyZoom();}
 document.getElementById("btnZoomIn").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom+.1)*10)/10);});
@@ -924,6 +930,38 @@ window.addEventListener("resize",()=>{if(fitMode)doFit();});
 
 /* ---- persistence ---- */
 const LSKEY="griddiagram:"+document.title;
+/* ---- action recorder (debug): every user action → in-memory + localStorage; download as JSONL. ON by default. ---- */
+let RECORDING=true;
+const ACTIONLOG=[], REC_LSKEY=LSKEY+":actions", REC_SESSION=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
+try{const _p=JSON.parse(localStorage.getItem(REC_LSKEY)||"[]");if(Array.isArray(_p))ACTIONLOG.push(..._p.slice(-500));}catch(_){}   // recover prior session (crash-safe)
+function recSnap(){const o={};for(const k in BOX){const b=BOX[k];o[k]=[b.col,b.row,b.cw,b.ch];}return o;}   // post-action geometry of every box
+function rec(type,detail){ if(!RECORDING)return;
+  const e=Object.assign({seq:ACTIONLOG.length,ts:new Date().toISOString(),session:REC_SESSION,cat:"user",type,edit:editMode},detail||{});
+  ACTIONLOG.push(e); if(ACTIONLOG.length>5000)ACTIONLOG.shift();
+  try{localStorage.setItem(REC_LSKEY,JSON.stringify(ACTIONLOG.slice(-500)));}catch(_){}
+  return e; }
+function downloadLog(){ if(!ACTIONLOG.length){alert("No actions recorded yet.");return;}
+  const jsonl=ACTIONLOG.map(e=>JSON.stringify(e)).join("\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([jsonl],{type:"application/x-ndjson"}));
+  a.download="daigram-actions-"+REC_SESSION+".jsonl";a.click(); }
+(function(){const br=document.getElementById("btnRec"),bl=document.getElementById("btnLog");
+  if(br)br.addEventListener("click",e=>{e.stopPropagation();RECORDING=!RECORDING;
+    br.textContent=RECORDING?"⏺ Rec":"⏸ Rec"; br.style.color=RECORDING?"#ff7b72":"#8b949e"; br.style.borderColor=RECORDING?"#ff7b72aa":"#30363d";});
+  if(bl)bl.addEventListener("click",e=>{e.stopPropagation();downloadLog();});})();
+/* raw pointer events (cat:"pointer"): down/up/click/dblclick/wheel always; moves recorded while pressed/dragging,
+   throttled on grid-cell change (or 60ms) so a drag's trajectory is captured without idle-hover flood. */
+let _pMove=0,_pCell="";
+function _recTgt(e){const t=e.target; if(!(t&&t.nodeType))return null; for(const k in boxEls){if(boxEls[k]&&boxEls[k].contains(t))return k;} return null;}
+function _recCell(e){try{const c=evCell(e);return c&&isFinite(c[0])?c:null;}catch(_){return null;}}
+function pRec(kind,e){ if(!RECORDING)return; rec("pointer",{cat:"pointer",kind,x:Math.round(e.clientX||0),y:Math.round(e.clientY||0),cell:_recCell(e),tgt:_recTgt(e),buttons:e.buttons}); }
+window.addEventListener("pointerdown",e=>pRec("down",e),true);
+window.addEventListener("pointerup",e=>pRec("up",e),true);
+window.addEventListener("dblclick",e=>pRec("dblclick",e),true);
+window.addEventListener("wheel",e=>pRec("wheel",e),{capture:true,passive:true});
+window.addEventListener("pointermove",e=>{ if(!(e.buttons||dragging))return;                 // only during a press/drag
+  const c=_recCell(e), cc=c?c.join(","):"", now=Date.now();
+  if(cc===_pCell && now-_pMove<60)return;                                                     // throttle: new cell or ≥60ms
+  _pMove=now; _pCell=cc; pRec("move",e); },true);
 function clonePath(p){return p?p.map(a=>[a[0],a[1]]):p;}
 /* Serialize the WHOLE tree (a box's `sub` recurses) so nested edits persist; captureState
    also records the current NAV path so a reload restores the same view. */
@@ -958,6 +996,7 @@ function normalizeState(){
     W.forEach(w=>{if(w.path)w.path=w.path.map(([c,r])=>[c+dc,r+dr]);});
     ZONES.forEach(z=>{z.col=Math.max(0,z.col+dc);z.row=Math.max(0,z.row+dr);});}
   GRID.cols=Math.max(12,Math.ceil(maxC+dc+M)); GRID.rows=Math.max(8,Math.ceil(maxR+dr+M));
+  rec("normalize",{cat:"engine",shift:[dc,dr],grid:[GRID.cols,GRID.rows]});   // engine: re-base to top-left + right-size grid (load)
   sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();
 }
 function autosave(){try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));}catch(err){}}
@@ -972,10 +1011,11 @@ function commit(){                                   // record a new committed s
   history.push(s);
   if(history.length>80)history.shift();
   hidx=history.length-1;
+  rec("mutate",{sel:selBox,expanded:[...EXPANDED],boxes:recSnap()});   // debug: geometry of every box after the change
   autosave();updateHistBtns();
 }
-function undo(){if(hidx>0){hidx--;applyState(history[hidx]);autosave();updateHistBtns();}}
-function redo(){if(hidx<history.length-1){hidx++;applyState(history[hidx]);autosave();updateHistBtns();}}
+function undo(){if(hidx>0){hidx--;applyState(history[hidx]);rec("undo",{hidx});autosave();updateHistBtns();}}
+function redo(){if(hidx<history.length-1){hidx++;applyState(history[hidx]);rec("redo",{hidx});autosave();updateHistBtns();}}
 function updateHistBtns(){const u=document.getElementById("btnUndo"),r=document.getElementById("btnRedo");
   if(u)u.disabled=hidx<=0; if(r)r.disabled=hidx>=history.length-1;}
 document.getElementById("btnUndo").addEventListener("click",e=>{e.stopPropagation();undo();});
@@ -1011,6 +1051,7 @@ function maybeGrow(){
   if(GRID.rows+growB+dr>GRID_MAX){growB=0;dr=0;}
   if(!growR&&!growB&&!dc&&!dr)return;
   gridGrow(growR,growB,dc,dr);
+  rec("gridGrow",{cat:"engine",growR,growB,dc,dr,grid:[GRID.cols,GRID.rows]});   // engine: infinite-canvas grow on pan-to-edge
   if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
   sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
   if(selBox&&editMode)showLevers(selBox);   // a left/top grow shifts the selected box → move its handles too
