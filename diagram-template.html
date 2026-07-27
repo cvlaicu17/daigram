@@ -403,30 +403,42 @@ function makeEngine(){
   const freeH=(c,r)=>!hOcc.has(key(c,r)), freeV=(c,r)=>!vOcc.has(key(c,r));
   function autoSides(a,b){const dx=(b.col+b.cw/2)-(a.col+a.cw/2), dy=(b.row+b.ch/2)-(a.row+a.ch/2);
     if(Math.abs(dx)>=Math.abs(dy))return dx>=0?["r","l"]:["l","r"]; return dy>=0?["b","t"]:["t","b"];}
+  const ALL_SIDES=["r","l","b","t"];
   function sideCells(b,side){const out=[];
     if(side==="r")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col+b.cw,r]);
     if(side==="l")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col-1,r]);
     if(side==="b")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row+b.ch]);
     if(side==="t")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row-1]);
     return out.filter(([c,r])=>inb(c,r)&&!isBox(c,r));}
+  // Center-bias: 0 at the middle of a side, rising toward CENTER_WEIGHT at either end — so the router
+  // prefers to leave/enter dead-center of a side (away from the box's rounded corners) but still uses
+  // a corner cell with no hard cliff when nothing else is reachable (e.g. a 1-cell-tall side).
+  const CENTER_WEIGHT=2.5;
+  function centerTax(len,i){ if(len<=1)return 0; const mid=(len-1)/2; return CENTER_WEIGHT*Math.abs(i-mid)/mid; }
   const orient=s=>(s==="l"||s==="r")?"H":"V";
-  function commit(cells){for(let i=0;i<cells.length-1;i++){const[c1,r1]=cells[i],[c2,r2]=cells[i+1];
-    if(r1===r2){hOcc.add(key(c1,r1));hOcc.add(key(c2,r2));}else{vOcc.add(key(c1,r1));vOcc.add(key(c2,r2));}}}
-  function route(fromId,toId,fromSide,toSide,relax){
-    // relax=true: ignore wire-occupancy (allow sharing a lane) but STILL never cross a box.
+  // dir ("H"/"V") is only consulted for a 1-cell path — a direct pass-through between two adjacent
+  // boxes has no interior segment to infer direction from, but must still occupy its one lane cell,
+  // or a later wire converging on the same cell/row never sees it as taken (full overlap).
+  function commit(cells,dir){
+    if(cells.length<2){ if(cells.length===1&&dir){const[c,r]=cells[0]; (dir==="H"?hOcc:vOcc).add(key(c,r));} return; }
+    for(let i=0;i<cells.length-1;i++){const[c1,r1]=cells[i],[c2,r2]=cells[i+1];
+      if(r1===r2){hOcc.add(key(c1,r1));hOcc.add(key(c2,r2));}else{vOcc.add(key(c1,r1));vOcc.add(key(c2,r2));}}
+  }
+  // One A* search for a single fixed (fromSide,toSide) pair. Center-bias is seeded into each candidate
+  // start cell's initial cost and added to the goal cell's final cost, so it competes on equal footing
+  // with path length + the existing per-turn penalty instead of being a separate, disconnected pass.
+  function searchSide(A,B,fromSide,toSide,relax){
     const okH=(c,r)=>relax||freeH(c,r), okV=(c,r)=>relax||freeV(c,r);
-    const A=BOX[fromId],B=BOX[toId]; if(!A||!B)return null;
-    const[afs,ats]=autoSides(A,B); fromSide=fromSide||afs; toSide=toSide||ats;
-    let starts=sideCells(A,fromSide), goals=sideCells(B,toSide);
-    if(!starts.length)for(const s of["r","l","b","t"]){starts=sideCells(A,s);if(starts.length){fromSide=s;break;}}
-    if(!goals.length) for(const s of["r","l","b","t"]){goals =sideCells(B,s);if(goals.length){toSide=s;break;}}
+    const starts=sideCells(A,fromSide), goals=sideCells(B,toSide);
     if(!starts.length||!goals.length)return null;
-    const goalSet=new Set(goals.map(([c,r])=>key(c,r)));
+    const goalTax=new Map(goals.map(([c,r],i)=>[key(c,r),centerTax(goals.length,i)]));
     const gh=(c,r)=>Math.min.apply(null,goals.map(([gc,gr])=>Math.abs(gc-c)+Math.abs(gr-r)));
     const sdir=orient(fromSide)==="H"?0:1, skey=(c,r,d)=>(r*cols+c)*2+d;
     const g=new Map(), came=new Map(), open=[], TURN=2;
-    for(const[c,r]of starts){ if(sdir===0&&!okH(c,r))continue; if(sdir===1&&!okV(c,r))continue;
-      const s=skey(c,r,sdir); g.set(s,0); open.push({c,r,d:sdir,f:gh(c,r),s}); }
+    starts.forEach(([c,r],i)=>{ if(sdir===0&&!okH(c,r))return; if(sdir===1&&!okV(c,r))return;
+      const s=skey(c,r,sdir), c0=centerTax(starts.length,i);
+      g.set(s,c0); open.push({c,r,d:sdir,f:c0+gh(c,r),s}); });
+    const goalSet=new Set(goals.map(([c,r])=>key(c,r)));
     let goal=null;
     while(open.length){
       let bi=0;for(let i=1;i<open.length;i++)if(open[i].f<open[bi].f||(open[i].f===open[bi].f&&open[i].s<open[bi].s))bi=i;
@@ -444,7 +456,26 @@ function makeEngine(){
     if(!goal)return null;
     const cells=[]; let s=goal.s;
     while(s!==undefined){const c=Math.floor(s/2)%cols, r=Math.floor(Math.floor(s/2)/cols); cells.unshift([c,r]); s=came.get(s);}
-    commit(cells); return {cells,fromSide,toSide};
+    return {cells,fromSide,toSide,cost:g.get(goal.s)+(goalTax.get(key(goal.c,goal.r))||0)};
+  }
+  // Try every (fromSide,toSide) combination (unless the caller pins one) and keep the cheapest —
+  // path length + turn penalty + both ends' center-bias — so side selection and pathing are optimized
+  // jointly instead of picking a side up front from box centers alone (the old autoSides-then-path split).
+  function route(fromId,toId,fromSide,toSide,relax){
+    const A=BOX[fromId],B=BOX[toId]; if(!A||!B)return null;
+    function searchCombos(fromSides,toSides){
+      let found=null;
+      for(const fs of fromSides)for(const ts of toSides){
+        const r=searchSide(A,B,fs,ts,relax);
+        if(r&&(!found||r.cost<found.cost))found=r;
+      }
+      return found;
+    }
+    let picked=searchCombos(fromSide?[fromSide]:ALL_SIDES, toSide?[toSide]:ALL_SIDES);
+    if(!picked&&(fromSide||toSide))picked=searchCombos(ALL_SIDES,ALL_SIDES);   // pinned side had nothing free — fall back to a full search
+    if(!picked)return null;
+    commit(picked.cells,orient(picked.fromSide));
+    return picked;
   }
   return {route,commit,isBox,autoSides,inb};
 }
@@ -461,7 +492,7 @@ function markers(){return `<defs>
 function wirePoints(w){
   const A=BOX[w.from], B=BOX[w.to]; if(!A||!B)return null;
   let cells, fs, ts, warn=false;
-  if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells); }
+  if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells,(fs==="l"||fs==="r")?"H":"V"); }
   else { let r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
     if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); } // relaxed: still routes AROUND boxes (may share a lane) — valid, NOT a warning
     if(!r){ // last resort — only if no box-avoiding orthogonal path exists at all (target enclosed)
@@ -814,8 +845,8 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
   if(EXPANDED.size===0){                                    // collapsed: in-place move on ROOT (persists directly)
     beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
       if(nc!==b.col||nr!==b.row)moved=true;
-      if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);routeAndDraw();}},
-      ()=>{dragging=false;commit();});
+      if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);}},   // reroute only after drop, not live per-frame
+      ()=>{dragging=false; if(moved)routeAndDraw(); commit();});
     return;
   }
   // expanded: b is a display-overlay box. Free-drag for feedback; on drop either (a) re-parent, when the
@@ -833,7 +864,7 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
       if(!moved)return;                                                // plain click/tap → keep selection + double-tap
       if(dropFid&&dropFid!==curParent){ reparentInto(id,dropFid,lc,lr); return; }   // crossed into another container
       if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box (FROZEN: no re-project)
-        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); commit(); }   // keep the on-screen frame; auto-scale re-applies on exit Edit mode
+        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); commit(); routeAndDraw(); }   // keep the on-screen frame, but reroute now the move succeeded; auto-scale re-applies on exit Edit mode
       else { b.col=orig.col; b.row=orig.row; layoutBoxes(); showLevers(id); routeAndDraw(); } });   // overlap → snap back in place (still frozen)
 }
 function delBox(id){ const p=parentDiagramOf(id); if(!p.diag||!p.diag.BOX[p.id])return;   // delete from the BASE tree (persists)
