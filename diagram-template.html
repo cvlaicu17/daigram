@@ -314,10 +314,26 @@ function layoutLevel(D, prefix, depth){
       e.cw=Math.max(e.box.cw, ch.w+2*NEST_M);
       e.ch=Math.max(e.box.ch, NEST_HEAD+ch.h+2*NEST_M);
     } }
-  for(const id of order){ const e=eff[id]; if(!e.container)continue;   // insert-space reflow
-    const dw=e.cw-e.box.cw, dh=e.ch-e.box.ch, rE=e.col+e.box.cw, bE=e.row+e.box.ch;
-    for(const oid in eff){ if(oid===id)continue; const x=eff[oid];
-      if(x.col>=rE)x.col+=dw; if(x.row>=bE)x.row+=dh; } }
+  // Minimal insert-space reflow: only boxes that actually share a band with a grown container
+  // move, and only by the amount that clears it plus a 1-cell channel gap (using whatever slack —
+  // pre-existing gap — they already had) — instead of shifting everything past the box's old edge
+  // by the same flat delta. Cascades in one sweep per axis (growth only ever pushes things later,
+  // never earlier, so original position order is a valid dependency order). Each axis uses the
+  // ORIGINAL (pre-growth) extents on the OTHER axis to decide whether a pair was ever side-by-side
+  // vs stacked, so a box that only grew taller gets handled by the row sweep, never nudged
+  // sideways by the column one.
+  const REFLOW_GAP=1;
+  function packAxis(axis){
+    const other=axis==="col"?"row":"col", sz=axis==="col"?"cw":"ch", osz=axis==="col"?"ch":"cw";
+    const ids=Object.keys(eff).sort((a,b)=>eff[a][axis]-eff[b][axis]);
+    for(let i=0;i<ids.length;i++){ const e=eff[ids[i]]; let pos=e[axis];
+      for(let j=0;j<i;j++){ const o=eff[ids[j]];
+        if(o.box[other]<e.box[other]+e.box[osz] && o.box[other]+o.box[osz]>e.box[other]) pos=Math.max(pos,o[axis]+o[sz]+REFLOW_GAP);
+      }
+      e[axis]=pos;
+    }
+  }
+  packAxis("col"); packAxis("row");
   let boxes=[], wires=[], zones=[];
   for(const id in eff){ const e=eff[id];
     boxes.push({fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
