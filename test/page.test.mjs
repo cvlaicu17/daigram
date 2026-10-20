@@ -343,3 +343,19 @@ test("arrows route AROUND an expanded box unless one of their ends is inside it 
   assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
   await p.eval(`localStorage.clear()`); await p.close();
 });
+
+test("hovering an expanded box keeps the arrows of its children visible and highlights its outside connections", opts, async () => {
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/t.html`);
+  await p.send("Emulation.setDeviceMetricsOverride", { width: 1800, height: 1300, deviceScaleFactor: 1, mobile: false });
+  await p.waitFor(`window.daigram`);
+  await p.eval(`localStorage.clear(); daigram.dispatch({op:"collapseAll"}); daigram.dispatch({op:"addWire",from:"g",to:"b/h1",label:"into-child"});
+    daigram.dispatch({op:"expandAll"}); daigram.dispatch({op:"fit",on:true})`);
+  const pt = await p.eval(`(()=>{const R=boxRect(BOX.b), s=stage.getBoundingClientRect(); return [s.left+(R.x+R.w-30)*zoom, s.top+(R.y+R.h-30)*zoom]})()`);
+  await p.mouse("mouseMoved", pt[0], pt[1], 0); await new Promise(r => setTimeout(r, 150));   // a real hover over b's empty interior
+  const st = await p.eval(`Object.fromEntries(wireNodes.map(n=>[n.from+"→"+n.to,(n.path.classList.contains("dimw")?"dim":"")+(n.path.classList.contains("hot")?"hot":"")]))`);
+  for (const w of ["b/h1→b/h2", "b/h2→b/h3", "b/h3/w1→b/h3/w2"]) assert.equal(st[w], "", w + " (inside b) must stay as it is");
+  for (const w of ["a→b", "b→d", "g→b/h1"]) assert.equal(st[w], "hot", w + " (crosses b's border) is b's connection");
+  assert.equal(st["c→f"], "dim");
+  assert.equal(await p.eval(`boxEls.g.classList.contains("adj")&&!boxEls.g.classList.contains("dim")`), true);   // g connects to a child of b
+  await p.eval(`daigram.dispatch({op:"collapseAll"}); localStorage.clear()`); await p.close();
+});

@@ -1201,8 +1201,10 @@ const dEl={tag:document.getElementById("d-tag"),title:document.getElementById("d
 function catClass(id){const c=(BOX[id].cls||"");return c.indexOf("blue")>=0?"blue":(c.indexOf("red")>=0?"red":"");}
 function select(id){
   const b=BOX[id],info=DESC[id]||{};
-  const adj=new Set();
-  wireNodes.forEach(w=>{if(w.from===id)adj.add(w.to);else if(w.to===id)adj.add(w.from);});
+  // A box "owns" the arrows of everything inside it (an expanded box's children, by fid prefix): arrows
+  // crossing its border are its connections (hot), arrows wholly inside it stay as they are (never dimmed).
+  const mine=f=>f===id||f.indexOf(id+"/")===0, adj=new Set();
+  wireNodes.forEach(w=>{const a=mine(w.from),b2=mine(w.to); if(a&&!b2)adj.add(w.to); else if(b2&&!a)adj.add(w.from);});
   // Highlight/dim is a VIEW-mode focus cue; in edit mode keep every box fully visible
   // (dimming others to opacity .28 made them look like they vanish while arranging).
   for(const bid in boxEls){const el=boxEls[bid];
@@ -1210,7 +1212,7 @@ function select(id){
     el.classList.toggle("active",!editMode&&bid===id);el.classList.toggle("adj",!editMode&&bid!==id&&adj.has(bid));el.classList.toggle("dim",!editMode&&!kin&&!adj.has(bid));}
   // Always highlight the selected box's own arrows (hot) — in edit mode too; only DIM the rest in
   // view mode (in edit mode keep every wire visible while arranging).
-  wireNodes.forEach(w=>{const isN=(w.from===id||w.to===id), dw=!editMode&&!isN;
+  wireNodes.forEach(w=>{const a=mine(w.from),b2=mine(w.to), isN=a!==b2, dw=!editMode&&!a&&!b2;
     w.path.classList.toggle("hot",isN);w.path.classList.toggle("dimw",dw);
     w.texts.forEach(t=>{ if(!t.classList.contains("bg"))t.classList.toggle("hot",isN); t.classList.toggle("dimw",dw); });});
   dEl.tag.className="dtag "+catClass(id); dEl.tag.textContent=info.cat||"Block";
