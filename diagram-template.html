@@ -367,7 +367,9 @@ const COMMANDS={
   deleteBox:{doc:"Delete a box, its sub-canvas, and every wire touching it.",args:{id:"fid!"}},
   reparentBox:{doc:"Move a box (with its subtree) into another level at (col,row). Wires that would then cross levels are dropped. Returns {fid}.",
     args:{id:"fid!",parent:"parent!",col:"nat!",row:"nat!"}},
-  addSub:{doc:"Give a box an empty sub-canvas (makes it expandable).",args:{id:"fid!"}},
+  setOpenSize:{doc:"Set the EXPANDED size of a box with a sub-canvas: cw x ch = the drawing area inside it (cells), separate from its collapsed cw/ch. col/row optionally move the box. The sub-canvas is then shown at its own coordinates (not re-centred), so drawing inside never shifts what is there; the first call re-bases existing content to (0,0).",
+    args:{id:"fid!",cw:"pos!",ch:"pos!",col:"nat",row:"nat"}},
+  addSub:{doc:"Give a box an empty sub-canvas (makes it expandable), with an 8x5 drawing area when expanded (see setOpenSize).",args:{id:"fid!"}},
   addWire:{doc:"Add an arrow from -> to (box paths). kind = UML arrow preset (generalization, composition, dependency, sync…); line/head/tail override it; fromLabel/toLabel = texts at the ends (multiplicity, role). Auto-routed unless path or row is given: path = free cells, local to the level, from next to `from` to next to `to`; row = a horizontal arrow on that row between two side-by-side boxes (sequence message; from = to: a self-message). path/row need both boxes in the same level. Returns {level,nth}.",
     args:{from:"fid!",to:"fid!",kind:"wireKind",label:"str",fromLabel:"str",toLabel:"str",style:"style",line:"line",head:"marker",tail:"marker",
           path:"path",row:"rowOrNull",fromSide:"side",toSide:"side"}},
@@ -515,7 +517,8 @@ function findWire(root,from,to,nth){ nth=nth||0;
   fail("no wire "+from+" -> "+to+(nth?" #"+nth:"")); }
 // Optional fields: "", null and false remove the field (the model stays minimal and backward compatible).
 const WIRE_PROPS=["kind","label","fromLabel","toLabel","style","line","head","tail","path","row","fromSide","toSide"];
-const BOX_PROPS=["kind","stereo","attrs","ops","abstract","acts","code"];
+const BOX_PROPS=["kind","stereo","attrs","ops","abstract","acts","code","ecw","ech"];   // ecw/ech: expanded drawing area (setOpenSize)
+const OPEN_DEFAULT=[8,5];
 const copyVal=v=>Array.isArray(v)?JSON.parse(JSON.stringify(v)):v;
 function setProps(o,c,keys){ for(const k of keys)if(c[k]!==undefined){ const v=c[k];
   if(v===null||v===""||v===false||(k==="kind"&&(v==="box"||v==="flow")))delete o[k]; else o[k]=copyVal(v); } }
@@ -562,7 +565,17 @@ const OPS={
     b.col=r.col; b.row=r.row; L.BOX[nid]=b; if(desc)L.DESC[nid]=desc; fitGrid(L,r);
     const fid=join(c.parent,nid); remapFlows(root,n=>inMoved(n)?fid+n.slice(c.id.length):n);
     return {fid}; },
-  addSub(root,c){ const b=needBox(root,c.id); if(b.sub)fail('box "'+c.id+'" already has a sub-canvas'); b.sub=normDiag({},root.GRID); },
+  addSub(root,c){ const b=needBox(root,c.id); if(b.sub)fail('box "'+c.id+'" already has a sub-canvas'); b.sub=normDiag({},root.GRID); b.ecw=OPEN_DEFAULT[0]; b.ech=OPEN_DEFAULT[1]; },
+  setOpenSize(root,c){ const b=needBox(root,c.id); if(!b.sub)fail('box "'+c.id+'" has no sub-canvas (addSub first)');
+    const S=normDiag(b.sub,root.GRID); let shift=[0,0];
+    if(c.col!==undefined||c.row!==undefined){ const p=parentOf(root,c.id), r={col:c.col!==undefined?c.col:b.col,row:c.row!==undefined?c.row:b.row,cw:b.cw,ch:b.ch};
+      checkFree(p.diag,r,p.id); b.col=r.col; b.row=r.row; fitGrid(p.diag,r); }
+    if(!b.ecw){   // auto-fit → sized: re-base the content to (0,0) so switching to "own coordinates" moves nothing on screen
+      let mc=Infinity,mr=Infinity; for(const k in S.BOX){mc=Math.min(mc,S.BOX[k].col);mr=Math.min(mr,S.BOX[k].row);} S.ZONES.forEach(z=>{mc=Math.min(mc,z.col);mr=Math.min(mr,z.row);});
+      if(isFinite(mc)&&(mc||mr)){ for(const k in S.BOX){S.BOX[k].col-=mc;S.BOX[k].row-=mr;} S.ZONES.forEach(z=>{z.col-=mc;z.row-=mr;});
+        S.W.forEach(w=>{ if(w.path)w.path=w.path.map(([x,y])=>[x-mc,y-mr]); if(w.row!==undefined)w.row-=mr; }); shift=[-mc,-mr]; } }
+    b.ecw=c.cw; b.ech=c.ch; S.GRID.cols=Math.max(S.GRID.cols,c.cw); S.GRID.rows=Math.max(S.GRID.rows,c.ch);
+    return {rebased:shift}; },
   addWire(root,c){ needBox(root,c.from); needBox(root,c.to);
     const s=splitAt(c.from,c.to,commonDepth(c.from,c.to)), D=s.anc?normDiag(boxByFid(root,s.anc).sub,root.GRID):root;
     const w={from:s.lf,to:s.lt}; setWireFields(w,c); checkWireGeom(D,s.lf,s.lt,w);
@@ -642,17 +655,18 @@ function layoutGroup(G){
   const r1=ext(k=>k.col+k.cw,G.kids),        b1=ext(k=>k.row+k.ch,G.kids);
   G.cw=G.box.cw+Math.max(0,r1-r0); G.ch=G.box.ch+Math.max(0,b1-b0);
 }
-function layoutLevel(D,prefix,depth,expanded,g){
+function layoutLevel(D,prefix,depth,expanded,g,literal){   // literal: keep the level's own coordinates (a sized container), else re-centre on its content
   D=normDiag(D,g); g=g||D.GRID;
   const eff={};
   for(const id in D.BOX){ const b=D.BOX[id];
     eff[id]={fid:prefix+id,id,col:b.col,row:b.row,cw:b.cw,ch:b.ch,box:b,hasSub:!!b.sub,container:false}; }
   for(const id in eff){ const e=eff[id];
     if(e.hasSub&&expanded.has(e.fid)){
-      const ch=layoutLevel(e.box.sub,e.fid+"/",depth+1,expanded,g);
+      const sized=!!e.box.ecw, ch=layoutLevel(e.box.sub,e.fid+"/",depth+1,expanded,g,sized);
       e._child=ch; e.container=true;
-      e.cw=Math.max(e.box.cw,ch.w+2*NEST_M);
-      e.ch=Math.max(e.box.ch,NEST_HEAD+ch.h+2*NEST_M);
+      e.cw=Math.max(e.box.cw,Math.max(ch.w,e.box.ecw||0)+2*NEST_M);
+      e.ch=Math.max(e.box.ch,NEST_HEAD+Math.max(ch.h,e.box.ech||0)+2*NEST_M);
+      e._lo=[NEST_M-ch.minC,NEST_HEAD+NEST_M-ch.minR];   // where the sub-canvas (0,0) sits, relative to the container's top-left
     } }
   // group tree: each box / zone belongs to the smallest zone that fully contains it (ties: earlier zone wins)
   const zs=D.ZONES.map((z,i)=>({zi:i,z,box:{col:z.col,row:z.row,cw:z.cw,ch:z.ch},col:z.col,row:z.row,cw:z.cw,ch:z.ch,kids:[]}));
@@ -668,7 +682,7 @@ function layoutLevel(D,prefix,depth,expanded,g){
   let boxes=[], wires=[], zones=[];
   for(const id in eff){ const e=eff[id];
     const props={}; for(const k of BOX_PROPS)if(e.box[k]!==undefined)props[k]=e.box[k];
-    boxes.push(Object.assign(props,{fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
+    boxes.push(Object.assign(props,{fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,_lo:e._lo,
       n:e.box.n,s:e.box.s,cls:e.box.cls,desc:D.DESC[id],_basebox:e.box,_diag:D}));   // back-refs for editing the model
     if(e.container){ const oc=e.col+NEST_M, orow=e.row+NEST_HEAD+NEST_M;
       for(const cb of e._child.boxes) boxes.push(Object.assign({},cb,{col:cb.col+oc,row:cb.row+orow}));
@@ -681,8 +695,9 @@ function layoutLevel(D,prefix,depth,expanded,g){
   const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
   boxes.forEach(b=>acc(b.col,b.row,b.cw,b.ch)); zones.forEach(z=>acc(z.col,z.row,z.cw,z.ch));
   if(!isFinite(minC)){minC=0;minR=0;maxC=0;maxR=0;}
+  if(literal){minC=0;minR=0;}
   boxes.forEach(b=>{b.col-=minC;b.row-=minR;}); zones.forEach(z=>{z.col-=minC;z.row-=minR;});
-  return {boxes,wires,zones,w:maxC-minC,h:maxR-minR};
+  return {boxes,wires,zones,w:maxC-minC,h:maxR-minR,minC,minR};
 }
 // Overlapping pairs in a flattened layout (a box may only overlap its own ancestors/descendants).
 function layoutOverlaps(boxes){ const out=[], kin=(a,b)=>a.indexOf(b+"/")===0||b.indexOf(a+"/")===0;
@@ -806,10 +821,12 @@ const allSubFids=(D,prefix,out)=>DaigramCore.allSubFids(D,prefix,out);
 
 // The expanded-view layout lives in the core (DOM-free, testable headless): DaigramCore.layoutLevel.
 const layoutLevel=(D,prefix,depth)=>DaigramCore.layoutLevel(D,prefix,depth,EXPANDED,ROOT.GRID);
+let ROOT_ORIGIN=[0,0];   // display cell of the root level's (0,0) (collapsed: the display IS the root)
 function buildDisplay(){
   const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
+  ROOT_ORIGIN=[M-L.minC,M-L.minR];
   for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
-    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,
+    _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,_lo:b._lo,
     _base:b._basebox,_diag:b._diag,_ox:(b.col+M)-b._basebox.col,_oy:(b.row+M)-b._basebox.row};   // exact display→base: base = display − _o
     for(const k of DaigramCore.BOX_PROPS)if(b[k]!==undefined)BOXd[b.fid][k]=b[k];
     if(b.desc)Dd[b.fid]=b.desc; }
@@ -821,6 +838,7 @@ function buildDisplay(){
 }
 /* render(): collapsed -> ROOT live (editable); expanded -> flattened display (view overlay). */
 function render(){
+  if(EXPANDED.size===0)ROOT_ORIGIN=[0,0];
   const disp = EXPANDED.size===0
     ? {GRID:ROOT.GRID,BOX:ROOT.BOX,W:ROOT.W,ZONES:ROOT.ZONES,DESC:ROOT.DESC,FLOWS:ROOT.FLOWS}
     : buildDisplay();
@@ -1270,6 +1288,7 @@ function beginDrag(e,onMove,onEnd){
   }
 }
 function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,cw:b.cw,ch:b.ch};
+  if(b._container)return resizeOpen(e,id,dir,b,orig);
   // Live feedback edits the displayed box only; the drop dispatches ONE resizeBox in base (level-local)
   // coords. Expanded: b is a display-overlay box (base = display − _o), collide vs same-level siblings.
   // Collapsed: b is the ROOT box itself, so it is put back before the command applies the change.
@@ -1288,6 +1307,32 @@ function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,c
           layoutBoxes(); showLevers(id); routeAndDraw(); });
 }
 
+// Resizing an EXPANDED box sets its expanded size (the drawing area inside), not its collapsed cw/ch,
+// and re-flows the view on drop so the neighbours make room. The preview may overlap until then.
+function resizeOpen(e,id,dir,b,orig){ const ox=b._ox||0, oy=b._oy||0;
+  beginDrag(e,ev=>{const[c,r]=evCell(ev);let n={...orig};
+    if(dir.indexOf("e")>=0)n.cw=Math.max(2*NEST_M+1,c-n.col+1);
+    if(dir.indexOf("s")>=0)n.ch=Math.max(NEST_HEAD+2*NEST_M+1,r-n.row+1);
+    if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-2*NEST_M-1);n.cw=right-n.col;}
+    if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-NEST_HEAD-2*NEST_M-1);n.ch=bot-n.row;}
+    Object.assign(b,n);layoutBoxes();showLevers(id);},
+    ()=>{ const n={col:b.col,row:b.row,cw:b.cw,ch:b.ch}; Object.assign(b,orig);
+      if(n.col===orig.col&&n.row===orig.row&&n.cw===orig.cw&&n.ch===orig.ch){layoutBoxes();showLevers(id);return;}
+      const cmd={op:"setOpenSize",id,cw:Math.max(1,n.cw-2*NEST_M),ch:Math.max(1,n.ch-NEST_HEAD-2*NEST_M)};
+      if(n.col!==orig.col)cmd.col=Math.max(0,n.col-ox); if(n.row!==orig.row)cmd.row=Math.max(0,n.row-oy);
+      const res=dispatch(cmd,{src:"ui"});        // re-projects: containers re-fit, neighbours pushed
+      if(!res.ok)renderKeepView(); reselect(id); });
+}
+// Can a new box go here? Collapsed: on free root cells. Expanded: inside the innermost expanded box under
+// its centre (or the root), clear of that level's own boxes.
+function placeOk(r){ if(EXPANDED.size===0)return cellsFree(r.col,r.row,r.cw,r.ch,null);
+  if(r.col<0||r.row<0)return false;
+  const host=dropContainerAt(r.col+r.cw/2,r.row+r.ch/2,"");
+  if(host){ const C=BOX[host]; if(r.col<C.col+NEST_M||r.row<C.row+NEST_HEAD+NEST_M||r.col+r.cw>C.col+C.cw-NEST_M||r.row+r.ch>C.row+C.ch-NEST_M)return false; }
+  const L=host?(rootBoxByFid(host)||{}).sub:ROOT;
+  for(const k in BOX){ const o=BOX[k]; if(o._diag!==L)continue; if(r.col<o.col+o.cw&&r.col+r.cw>o.col&&r.row<o.row+o.ch&&r.row+r.ch>o.row)return false; }
+  return true; }
+
 /* -- box create (drag over cells) -- */
 function clearGhosts(){document.querySelectorAll(".ghost").forEach(g=>g.remove());}
 function stageDown(e){
@@ -1298,13 +1343,13 @@ function stageDown(e){
     const g=document.createElement("div");g.className="ghost";stage.appendChild(g);
     let rr=null;
     const paint=(col,row,cw,ch)=>{const R=boxRect({col,row,cw,ch});g.style.left=R.x+"px";g.style.top=R.y+"px";g.style.width=R.w+"px";g.style.height=R.h+"px";
-      g.classList.toggle("bad",!cellsFree(col,row,cw,ch,null));rr={col,row,cw,ch};};
+      g.classList.toggle("bad",!placeOk({col,row,cw,ch}));rr={col,row,cw,ch};};
     const DW=3,DH=2, tc=Math.max(0,Math.min(c0,GRID.cols-DW)), tr=Math.max(0,Math.min(r0,GRID.rows-DH));
     paint(tc,tr,DW,DH);   // a plain tap drops a DW×DH box you can then resize
     let dragged=false;
     beginDrag(e,ev=>{const[c,r]=evCell(ev);if(c!==c0||r!==r0)dragged=true;
       if(dragged)paint(Math.min(c0,c),Math.min(r0,r),Math.abs(c-c0)+1,Math.abs(r-r0)+1);},
-      ()=>{g.remove();if(rr&&cellsFree(rr.col,rr.row,rr.cw,rr.ch,null)){addBox(rr);}});
+      ()=>{g.remove();if(rr&&placeOk(rr)){addBox(rr);}});
   } else {   // any non-box tool: drag empty grid to PAN (delta-based, grows infinitely)
     e.preventDefault();
     let px=pt(e).clientX, py=pt(e).clientY;
@@ -1315,16 +1360,15 @@ function stageDown(e){
       ()=>{stage.classList.remove("panning"); dispatch({op:"scroll",left:stageWrap.scrollLeft,top:stageWrap.scrollTop},{src:"ui"});});
   }
 }
-// Display cell → coordinates local to the sub-canvas of the expanded container `host`. Uses the real
-// display offset of a box already in that level (the level is re-normalized and may have reflowed);
-// an empty level falls back to the container's interior origin.
-function toLocal(host,c,r){ const hb=rootBoxByFid(host), L=hb&&hb.sub;
-  for(const k in BOX){ const o=BOX[k]; if(L&&o._diag===L)return [Math.max(0,c-o._ox),Math.max(0,r-o._oy)]; }
-  const C=BOX[host]; return [Math.max(0,c-(C.col+NEST_M)),Math.max(0,r-(C.row+NEST_HEAD+NEST_M))]; }
+// Display cell → coordinates local to the sub-canvas of the expanded container `host` (null = the root level),
+// using where that level's (0,0) is shown (container _lo / ROOT_ORIGIN).
+function toLocal(host,c,r){ if(!host)return [Math.max(0,c-ROOT_ORIGIN[0]),Math.max(0,r-ROOT_ORIGIN[1])];   // root level
+  const C=BOX[host], lo=C._lo||[NEST_M,NEST_HEAD+NEST_M];                                                     // where the sub-canvas (0,0) is shown
+  return [Math.max(0,c-(C.col+lo[0])),Math.max(0,r-(C.row+lo[1]))]; }
 function addBox(r){
   const host=dropContainerAt(r.col+r.cw/2, r.row+r.ch/2, "");   // expanded container under the drop centre
   setTool("select");
-  const [col,row]=host?toLocal(host,r.col,r.row):[r.col,r.row];
+  const [col,row]=toLocal(host||null,r.col,r.row);
   const res=dispatch({op:"addBox",parent:host||"",n:"New box",col,row,cw:r.cw,ch:r.ch},{src:"ui"});
   if(res.ok&&BOX[res.fid]){ pin(res.fid); showLevers(res.fid); }
 }
@@ -1335,6 +1379,7 @@ function attachBoxHandlers(el,id){
   bindStart(el,e=>{
     if(!editMode||editingText)return;                 // let native caret/selection work while editing text
     if(tool==="del"){e.stopPropagation();delBox(id);return;}
+    if(tool==="box"&&BOX[id]&&BOX[id]._container){e.stopPropagation();stageDown(e);return;}   // draw a new box INSIDE an expanded box
     if(tool==="arrow"){e.stopPropagation();startArrow(e,id);return;}
     if(tool==="select"){e.stopPropagation();
       // double-tap → inline rename. Detect on POINTERDOWN: the click event is eaten by the stage

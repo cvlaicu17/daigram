@@ -27,6 +27,10 @@ visual editor.
   boxes aside ("insert space"). Multiple boxes open at once, recursively — **⤢ Expand all** shows the
   whole hierarchy on one canvas; **⤡** collapses. Expansion is a view overlay (the base tree stays
   editable in Edit mode); the flattened display reuses the same router/zoom/pan.
+  - **Expanded size ≠ collapsed size:** resizing an *expanded* box sets its drawing area (`ecw`/`ech`, command
+    `setOpenSize`) — the collapsed box keeps its own `cw`/`ch`. A box with an expanded size shows its sub-canvas at
+    its own coordinates, so drawing inside never shifts what's there. ＋ (create a sub-canvas) starts with an 8×5 area.
+    In Edit mode, **+ Box** and **+ Arrow** work inside an expanded box.
   - **Only what's in the way moves:** a grown container pushes a box only if it would overlap it or
     come closer than a 1-cell routing channel (boxes that were touching stay touching), right or down —
     whichever is the shorter push. A **zone moves as one rigid group** and grows around its own members.

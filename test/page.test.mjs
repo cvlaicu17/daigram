@@ -232,3 +232,45 @@ test("editing a .daigram.json live: Save writes the file; a change on disk reloa
   assert.match(await p.eval(`buildSaveHtml()`), /let SOURCE=null;/);
   await p.close();
 });
+
+test("draw inside an expanded box: resize it (neighbours make room), add boxes and an arrow in it", opts, async () => {
+  const { sourceText, readSource, loadCore } = await import("../daigram.mjs"), core = loadCore();
+  const f = path.join(dir, "nest.daigram.json"), root = core.normDiag({ GRID: { cols: 18, rows: 11, cell: 64, gap: 5 } });
+  root.BOX.p = { n: "P", s: "", cls: "", col: 1, row: 1, cw: 3, ch: 2 }; root.BOX.q = { n: "Q", s: "", cls: "", col: 6, row: 1, cw: 3, ch: 2 };
+  fs.writeFileSync(f, sourceText({ daigram: 1, title: "Nest", root: core.serializeDiagram(root) }));
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/nest.daigram.json?view`);
+  await p.send("Emulation.setDeviceMetricsOverride", { width: 1800, height: 1300, deviceScaleFactor: 1, mobile: false });
+  await p.waitFor(`window.daigram && daigram.query({q:"view"}).recording.sink==="server"`);
+  const last = () => p.eval(`(()=>{const l=daigram.log().filter(e=>e.k==="cmd");return l[l.length-1]})()`);
+  const cellPt = (c, r) => p.eval(`(()=>{const s=stage.getBoundingClientRect(),k=GRID.cell*zoom;return [s.left+(${c}+.5)*k,s.top+(${r}+.5)*k]})()`);
+  await p.eval(`daigram.dispatch({op:"setMode",edit:true})`);
+  await p.eval(`document.getElementById("box-p").querySelector(".boxexp").click()`);   // ＋ create a sub-canvas
+  assert.equal((await last()).cmd.op, "addSub");
+  await p.eval(`document.getElementById("box-p").querySelector(".boxexp").click()`);   // ⤢ expand
+  const P = await p.eval(`[BOX.p.col,BOX.p.row,BOX.p.cw,BOX.p.ch]`);
+  // resize the expanded box with its SE lever: two cells wider
+  const [px, py] = await p.center("p"); await p.mouse("mousePressed", px, py); await p.mouse("mouseReleased", px, py, 0);
+  const se = await p.eval(`(()=>{const r=document.querySelector(".lever.se").getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]})()`);
+  const k = await p.eval(`GRID.cell*zoom`); await p.drag(se[0], se[1], se[0] + 2 * k, se[1]);
+  const rs = await last();
+  assert.deepEqual(rs.cmd, { op: "setOpenSize", id: "p", cw: P[2] - 2 + 2, ch: P[3] - 3 });
+  assert.deepEqual(await p.eval(`[ROOT.BOX.p.cw,ROOT.BOX.p.ch]`), [3, 2]);                // collapsed size untouched
+  const P2 = await p.eval(`[BOX.p.col,BOX.p.row,BOX.p.cw,BOX.p.ch]`), Q = await p.eval(`[BOX.q.col,BOX.q.row,BOX.q.cw,BOX.q.ch]`);
+  assert.ok(Q[0] >= P2[0] + P2[2] || Q[1] >= P2[1] + P2[3], "q was pushed clear: " + JSON.stringify({ P2, Q }));
+  // + Box twice inside, then an arrow between them
+  for (const dc of [0, 4]) {
+    await p.eval(`document.querySelector('.tool[data-tool="box"]').click()`);
+    const [x0, y0] = await cellPt(P2[0] + 1 + dc, P2[1] + 2), [x1, y1] = await cellPt(P2[0] + 2 + dc, P2[1] + 2);
+    await p.drag(x0, y0, x1, y1);
+    const a = await last(); assert.equal(a.cmd.op, "addBox"); assert.equal(a.cmd.parent, "p"); assert.deepEqual([a.cmd.col, a.cmd.row], [dc, 0]); assert.equal(a.ok, true);
+  }
+  await p.eval(`document.querySelector('.tool[data-tool="arrow"]').click()`);
+  const [ax, ay] = await p.center("p/n0"), [bx, by] = await p.center("p/n1"); await p.drag(ax, ay, bx, by);
+  assert.deepEqual((await last()).cmd, { op: "addWire", from: "p/n0", to: "p/n1" });
+  assert.equal(await p.eval(`document.querySelectorAll("path.wire.warn").length`), 0);
+  await p.eval(`daigram.dispatch({op:"save"})`); await p.waitFor(`document.getElementById("btnSave").textContent.startsWith("Saved")`);
+  const saved = readSource(fs.readFileSync(f, "utf8")).root.boxes.p;
+  assert.deepEqual([saved.cw, saved.ch, saved.ecw, Object.keys(saved.sub.boxes).length, saved.sub.wires.length], [3, 2, P[2] - 2 + 2, 2, 1]);
+  assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
+  await p.close();
+});

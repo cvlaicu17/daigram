@@ -367,3 +367,37 @@ test("extract keeps a page's own CSS and header; build puts them back", async ()
   const d = m.loadAny((() => { const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dg-x-")), "v.daigram.json"); fs.writeFileSync(f, m.sourceText(src)); return f; })());
   ok(d.core.apply(d.root, { op: "setBox", id: "a", cls: "aws" }));                   // own classes are valid in a source too
 });
+
+/* ---- expanded size (setOpenSize) and drawing inside expanded boxes ---- */
+test("addSub gives a drawing area; setOpenSize sets the expanded size, never the collapsed one, and pushes neighbours", () => {
+  const { core } = fresh(), root = level(core, { p: [1, 1, 3, 2], q: [6, 1, 3, 2] });
+  ok(core.apply(root, { op: "addSub", id: "p" }));
+  let L = lay(core, root, ["p"]);
+  assert.deepEqual(plain(L.at.p.slice(2)), [8 + 2, 5 + 3]);                      // 8x5 area + margins/header
+  ok(core.apply(root, { op: "setOpenSize", id: "p", cw: 12, ch: 6 }));
+  assert.deepEqual(plain([root.BOX.p.cw, root.BOX.p.ch, root.BOX.p.ecw, root.BOX.p.ech]), [3, 2, 12, 6]);
+  L = lay(core, root, ["p"]);
+  assert.deepEqual(plain(L.overlaps), []);
+  assert.ok(L.at.q[0] >= L.at.p[0] + L.at.p[2] + 1 || L.at.q[1] >= L.at.p[1] + L.at.p[3] + 1, "q pushed clear of p");
+  bad(core.apply(root, { op: "setOpenSize", id: "q", cw: 4, ch: 4 }), /no sub-canvas/);
+});
+
+test("a sized box shows its sub-canvas at its own coordinates: drawing at the top-left moves nothing else", () => {
+  const { core } = fresh(), root = level(core, { p: [0, 0, 3, 2] });
+  ok(core.apply(root, { op: "addSub", id: "p" }));
+  ok(core.apply(root, { op: "addBox", parent: "p", id: "x", col: 4, row: 2, cw: 2, ch: 1 }));
+  const before = lay(core, root, ["p"]).at["p/x"];
+  ok(core.apply(root, { op: "addBox", parent: "p", id: "y", col: 0, row: 0, cw: 2, ch: 1 }));
+  const after = lay(core, root, ["p"]);
+  assert.deepEqual(plain(after.at["p/x"]), plain(before));                         // x did not jump
+  assert.deepEqual(plain(after.at["p/y"].slice(0, 2)), [1, 2]);                      // (0,0) = just inside margin + header
+});
+
+test("setOpenSize on an auto-fit box re-bases its content so nothing moves on screen", () => {
+  const { core, root } = fresh();                                                    // the sample's b: content starts at col 0 / row 2
+  const pos = L => Object.fromEntries(L.boxes.filter(b => b.fid.startsWith("b/")).map(b => [b.fid, [b.col - L.at.b[0], b.row - L.at.b[1]]]));
+  const before = pos(lay(core, root, ["b"]));
+  const r = ok(core.apply(root, { op: "setOpenSize", id: "b", cw: 20, ch: 8 }));
+  assert.deepEqual(plain(r.rebased), [0, -2]);
+  assert.deepEqual(pos(lay(core, root, ["b"])), before);
+});
