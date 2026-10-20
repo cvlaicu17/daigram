@@ -224,7 +224,6 @@
     <button id="btnReset">Reset</button>
     <button id="btnExport">Export ⤓</button>
     <button id="btnSaveFile" title="Write this layout back to an .html file (Chrome/Edge; else downloads)">Save to file ⤓</button>
-    <button id="btnRec" title="Recording every user action for debugging — click to pause" style="border-color:#ff7b72aa;color:#ff7b72">⏺ Rec</button>
     <button id="btnLog" title="Download the recorded action log (JSONL)">Log ⤓</button>
     <button id="btnReplay" title="Replay a recorded session (.jsonl) from its starting state">Replay ⤒</button>
     <input type="file" id="fileReplay" accept=".jsonl,application/x-ndjson,application/json" style="display:none">
@@ -247,7 +246,7 @@
       <button id="btnRedo" title="Redo (⌘/Ctrl+⇧Z)" disabled>↷ Redo</button>
       <button id="btnCopyCfg" title="Copy the GRID/BOX/W config">Copy config</button>
     </span>
-    <span class="hint">layout auto-restores on reload (saved in this browser)</span>
+    <span class="hint"><span id="recStatus" style="color:#ff7b72">●</span> every action is recorded · layout auto-restores on reload</span>
   </div>
 </header>
 <div class="layout">
@@ -408,7 +407,6 @@ const COMMANDS={
   saveToFile:{view:true,effect:true,doc:"Write the layout into an .html file.",args:{}},
   copyConfig:{view:true,effect:true,doc:"Copy the GRID/BOX/W config to the clipboard.",args:{}},
   downloadLog:{view:true,effect:true,doc:"Download the recording as JSONL.",args:{}},
-  record:{view:true,effect:true,doc:"Pause / resume recording.",args:{on:"bool!"}},
   reset:{view:true,effect:true,doc:"Forget the saved layout and reload the page.",args:{}},
 };
 const QUERIES={
@@ -1323,15 +1321,16 @@ function resizeOpen(e,id,dir,b,orig){ const ox=b._ox||0, oy=b._oy||0;
       const res=dispatch(cmd,{src:"ui"});        // re-projects: containers re-fit, neighbours pushed
       if(!res.ok)renderKeepView(); reselect(id); });
 }
-// Can a new box go here? Collapsed: on free root cells. Expanded: inside the innermost expanded box under
-// its centre (or the root), clear of that level's own boxes.
-function placeOk(r){ if(EXPANDED.size===0)return cellsFree(r.col,r.row,r.cw,r.ch,null);
-  if(r.col<0||r.row<0)return false;
-  const host=dropContainerAt(r.col+r.cw/2,r.row+r.ch/2,"");
-  if(host){ const C=BOX[host]; if(r.col<C.col+NEST_M||r.row<C.row+NEST_HEAD+NEST_M||r.col+r.cw>C.col+C.cw-NEST_M||r.row+r.ch>C.row+C.ch-NEST_M)return false; }
+// Where would a new box drawn over rect r go? Collapsed: on free root cells (else null). Expanded: into
+// the innermost expanded box under its centre (or the root); drawn over that box's title or margin it
+// is snapped into the drawing area. Returns the (snapped) rect, or null if it would overlap a box of that level.
+function placeAt(r){ if(EXPANDED.size===0)return cellsFree(r.col,r.row,r.cw,r.ch,null)?r:null;
+  const host=dropContainerAt(r.col+r.cw/2,r.row+r.ch/2,""); r={...r};
+  if(host){ const C=BOX[host], lo=C._lo||[NEST_M,NEST_HEAD+NEST_M]; r.col=Math.max(r.col,C.col+lo[0]); r.row=Math.max(r.row,C.row+lo[1]); }
+  if(r.col<0||r.row<0)return null;
   const L=host?(rootBoxByFid(host)||{}).sub:ROOT;
-  for(const k in BOX){ const o=BOX[k]; if(o._diag!==L)continue; if(r.col<o.col+o.cw&&r.col+r.cw>o.col&&r.row<o.row+o.ch&&r.row+r.ch>o.row)return false; }
-  return true; }
+  for(const k in BOX){ const o=BOX[k]; if(o._diag!==L)continue; if(r.col<o.col+o.cw&&r.col+r.cw>o.col&&r.row<o.row+o.ch&&r.row+r.ch>o.row)return null; }
+  return r; }
 
 /* -- box create (drag over cells) -- */
 function clearGhosts(){document.querySelectorAll(".ghost").forEach(g=>g.remove());}
@@ -1342,14 +1341,15 @@ function stageDown(e){
     clearGhosts();                                   // never leave a stray dashed box
     const g=document.createElement("div");g.className="ghost";stage.appendChild(g);
     let rr=null;
-    const paint=(col,row,cw,ch)=>{const R=boxRect({col,row,cw,ch});g.style.left=R.x+"px";g.style.top=R.y+"px";g.style.width=R.w+"px";g.style.height=R.h+"px";
-      g.classList.toggle("bad",!placeOk({col,row,cw,ch}));rr={col,row,cw,ch};};
+    const paint=(col,row,cw,ch)=>{const p=placeAt({col,row,cw,ch}), q=p||{col,row,cw,ch}, R=boxRect(q);   // the ghost shows where the box will really go
+      g.style.left=R.x+"px";g.style.top=R.y+"px";g.style.width=R.w+"px";g.style.height=R.h+"px";
+      g.classList.toggle("bad",!p);rr=p;};
     const DW=3,DH=2, tc=Math.max(0,Math.min(c0,GRID.cols-DW)), tr=Math.max(0,Math.min(r0,GRID.rows-DH));
     paint(tc,tr,DW,DH);   // a plain tap drops a DW×DH box you can then resize
     let dragged=false;
     beginDrag(e,ev=>{const[c,r]=evCell(ev);if(c!==c0||r!==r0)dragged=true;
       if(dragged)paint(Math.min(c0,c),Math.min(r0,r),Math.abs(c-c0)+1,Math.abs(r-r0)+1);},
-      ()=>{g.remove();if(rr&&placeOk(rr)){addBox(rr);}});
+      ()=>{g.remove();if(rr)addBox(rr);});
   } else {   // any non-box tool: drag empty grid to PAN (delta-based, grows infinitely)
     e.preventDefault();
     let px=pt(e).clientX, py=pt(e).clientY;
@@ -1710,7 +1710,6 @@ const VIEW={
   copyConfig(c,o){ const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
     navigator.clipboard.writeText(js).then(()=>flash(o.btn,"Copied ✓"),()=>{prompt("Copy config:",js);}); },
   downloadLog(){ downloadLog(); },
-  record(c){ setRecording(c.on); },
   reset(){ try{localStorage.removeItem(LSKEY);}catch(err){} recFlush(true); location.reload(); },
 };
 function dispatch(cmd,opts){ opts=opts||{}; const t0=performance.now(), src=opts.src||"api";
@@ -1742,7 +1741,7 @@ function afterModel(cmd,res,opts){
 function daigramQuery(q){
   if(q&&q.q==="view"&&Object.keys(q).length===1)return {ok:true,edit:editMode,tool,zoom,fit:fitMode,expanded:[...EXPANDED],selected:pinned,
     grid:[GRID.cols,GRID.rows],boxes:recSnap(),wires:W.length,warnWires:document.querySelectorAll("path.wire.warn").length,
-    recording:{on:RECORDING,sink:REC_SINK,session:REC_SESSION,file:REC_FILE}};
+    recording:{on:true,sink:REC_SINK,session:REC_SESSION,file:REC_FILE}};
   return DaigramCore.query(ROOT,q); }
 function batch(cmds,src){ const results=[]; for(const c of cmds){ const r=dispatch(c,{src}); results.push(r); if(!r.ok)break; }
   return {ok:results.length===cmds.length&&results.every(r=>r.ok),results}; }
@@ -1754,7 +1753,7 @@ function batch(cmds,src){ const results=[]; for(const c of cmds){ const r=dispat
    Sink: served by `node daigram.mjs serve`, lines are POSTed to /api/rec and appended on disk to
    recordings/<page>/<session>.jsonl; opened as a plain file, they stay in this browser (localStorage,
    last 500) and "Log ⤓" downloads them. */
-let RECORDING=true, REC_SEQ=0, REC_SINK="pending", REC_FILE=null, recQ=[], recTimer=null;
+let REC_SEQ=0, REC_SINK="pending", REC_FILE=null, recQ=[], recTimer=null;
 const ACTIONLOG=[], REC_LSKEY=LSKEY+":actions", REC_PAGE=location.pathname||"/diagram.html",
       REC_SESSION=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)+"-"+Math.random().toString(36).slice(2,6);
 let REC_PRIOR=[]; try{const p=JSON.parse(localStorage.getItem(REC_LSKEY)||"[]");if(Array.isArray(p))REC_PRIOR=p.slice(-500);}catch(_){}   // earlier sessions in this browser (crash-safe)
@@ -1765,9 +1764,8 @@ function recPush(e){ e.seq=REC_SEQ++; e.ts=new Date().toISOString();
   else { recQ.push(e); if(REC_SINK==="server"&&!recTimer)recTimer=setTimeout(recFlush,250); }
   return e; }
 function recStoreLocal(){ try{localStorage.setItem(REC_LSKEY,JSON.stringify(REC_PRIOR.concat(ACTIONLOG).slice(-500)));}catch(_){} }
-function rec(type,detail){ if(!RECORDING)return; return recPush(Object.assign({k:"trace",session:REC_SESSION,cat:"engine",type,edit:editMode},detail||{})); }
+function rec(type,detail){ return recPush(Object.assign({k:"trace",session:REC_SESSION,cat:"engine",type,edit:editMode},detail||{})); }
 function recCmd(cmd,res,src,opts,ms){
-  if(!RECORDING&&!(cmd&&cmd.op==="record"))return;   // pausing is itself recorded
   const e={k:"cmd",session:REC_SESSION,src,cmd,ok:!!res.ok};
   if(!res.ok)e.error=res.error;
   const out={}; for(const k in res)if(k!=="ok"&&k!=="error")out[k]=res[k]; if(Object.keys(out).length)e.result=out;
@@ -1785,11 +1783,10 @@ function recDetectSink(){ if(!/^https?:$/.test(location.protocol)){recSetSink("b
   fetch("/api/hello?page="+encodeURIComponent(REC_PAGE)+"&session="+encodeURIComponent(REC_SESSION),{cache:"no-store"})
     .then(r=>r.ok?r.json():null).then(j=>{ if(j&&j.daigram){REC_FILE=j.file||null;recSetSink("server");} else recSetSink("browser"); })
     .catch(()=>recSetSink("browser")); }
-function setRecording(on){ RECORDING=on; updateRecBtn(); }
-function updateRecBtn(){ const br=document.getElementById("btnRec"); if(!br)return;
-  br.textContent=RECORDING?(REC_SINK==="server"?"⏺ Rec → file":"⏺ Rec"):"⏸ Rec";
-  br.style.color=RECORDING?"#ff7b72":"#8b949e"; br.style.borderColor=RECORDING?"#ff7b72aa":"#30363d";
-  br.title=(RECORDING?"Recording every action ":"Recording paused ")+(REC_SINK==="server"?"to "+(REC_FILE||"recordings/"):"in this browser only — serve the page with `node daigram.mjs serve` to record to files")+" — click to "+(RECORDING?"pause":"resume"); }
+// Recording is always on; the toolbar dot says where it goes.
+function updateRecBtn(){ const el=document.getElementById("recStatus"); if(!el)return;
+  el.title=REC_SINK==="server"?"Recording every action to "+(REC_FILE||"recordings/"):"Recording every action in this browser (Log ⤓ downloads it) — serve the page with `node daigram.mjs serve` to record to files";
+  el.textContent=REC_SINK==="server"?"● → file":"●"; }
 function downloadLog(){ if(!ACTIONLOG.length){alert("No actions recorded yet.");return;}
   download("daigram-"+fileStem()+"-"+REC_SESSION+".jsonl","application/x-ndjson",ACTIONLOG.map(e=>JSON.stringify(e)).join("\n")); }
 /* raw pointer events (cat:"pointer"): down/up/click/dblclick/wheel always; moves recorded while pressed/dragging,
@@ -1797,7 +1794,7 @@ function downloadLog(){ if(!ACTIONLOG.length){alert("No actions recorded yet.");
 let _pMove=0,_pCell="";
 function _recTgt(e){const t=e.target; if(!(t&&t.nodeType))return null; for(const k in boxEls){if(boxEls[k]&&boxEls[k].contains(t))return k;} return null;}
 function _recCell(e){try{const c=evCell(e);return c&&isFinite(c[0])?c:null;}catch(_){return null;}}
-function pRec(kind,e){ if(!RECORDING)return; rec("pointer",{cat:"pointer",kind,x:Math.round(e.clientX||0),y:Math.round(e.clientY||0),cell:_recCell(e),tgt:_recTgt(e),buttons:e.buttons}); }
+function pRec(kind,e){ rec("pointer",{cat:"pointer",kind,x:Math.round(e.clientX||0),y:Math.round(e.clientY||0),cell:_recCell(e),tgt:_recTgt(e),buttons:e.buttons}); }
 window.addEventListener("pointerdown",e=>pRec("down",e),true);
 window.addEventListener("pointerup",e=>pRec("up",e),true);
 window.addEventListener("dblclick",e=>pRec("dblclick",e),true);
@@ -1862,7 +1859,7 @@ function onClick(id,mk){ const b=typeof id==="string"?document.getElementById(id
 onClick("btnUndo",()=>({op:"undo"})); onClick("btnRedo",()=>({op:"redo"}));
 onClick("btnSave",()=>({op:"save"})); onClick("btnReset",()=>({op:"reset"})); onClick("btnExport",()=>({op:"export"}));
 onClick("btnSaveFile",()=>({op:"saveToFile"})); onClick("btnCopyCfg",()=>({op:"copyConfig"}));
-onClick("btnRec",()=>({op:"record",on:!RECORDING})); onClick("btnLog",()=>({op:"downloadLog"}));
+onClick("btnLog",()=>({op:"downloadLog"}));
 onClick("btnEdit",()=>({op:"setMode",edit:!editMode}));
 document.querySelectorAll(".tool").forEach(b=>onClick(b,()=>({op:"setTool",tool:b.dataset.tool})));
 // Opening a file picker is not an action; what the picked file does (import / replay) is.

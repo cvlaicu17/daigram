@@ -131,7 +131,7 @@ session header holding the starting state, so **every session can be replayed ex
 
 ```bash
 node daigram.mjs serve            # serves this folder on http://127.0.0.1:4173/
-# open http://127.0.0.1:4173/diagram-template.html — the Rec button shows "⏺ Rec → file"
+# open http://127.0.0.1:4173/diagram-template.html — the toolbar shows "● → file" (always on, no pause)
 # every session lands in recordings/<page>/<session>.jsonl
 ```
 

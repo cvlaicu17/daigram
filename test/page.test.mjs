@@ -36,12 +36,13 @@ test("boots recording to the server, with a session header carrying the start st
   assert.equal(v.recording.on, true);
   assert.match(v.recording.file, /recordings\/t\/.*\.jsonl$/);
   assert.equal(await page.eval(`daigram.log().find(e=>e.k==="session").state.v`), 4);
-  assert.match(await page.eval(`document.getElementById("btnRec").textContent`), /→ file/);
+  assert.match(await page.eval(`document.getElementById("recStatus").textContent`), /→ file/);
+  assert.equal(await page.eval(`!!document.getElementById("btnRec")`), false);   // no pause button: everything is recorded
 });
 
 test("toolbar buttons go through dispatch", opts, async () => {
   const expect = [["btnEdit", "setMode"], ["btnZoomIn", "zoom"], ["btnZoomOut", "zoom"], ["btnFit", "fit"], ["btnFit", "fit"],
-    ["btnInfo", "info"], ["btnInfo", "info"], ["btnSave", "save"], ["btnRec", "record"], ["btnRec", "record"], ["btnEdit", "setMode"]];
+    ["btnInfo", "info"], ["btnInfo", "info"], ["btnSave", "save"], ["btnEdit", "setMode"]];
   for (const [id, op] of expect) { await click(id); assert.equal((await lastCmd()).cmd.op, op, id); }
   await page.eval(`document.querySelector(".d-close").click()`); assert.equal((await lastCmd()).cmd.op, "details");
   await page.eval(`document.querySelector(".d-reopen").click()`); assert.equal((await lastCmd()).cmd.open, true);
@@ -52,7 +53,6 @@ test("toolbar buttons go through dispatch", opts, async () => {
   assert.equal((await lastCmd()).cmd.op, "collapseAll");
   await page.eval(`document.getElementById("box-b").querySelector(".boxexp").click()`); assert.deepEqual((await lastCmd()).cmd, { op: "expand", id: "b" });
   await page.eval(`document.getElementById("box-b").querySelector(".boxexp").click()`); assert.deepEqual((await lastCmd()).cmd, { op: "collapse", id: "b" });
-  assert.equal(await page.eval(`document.getElementById("btnRec").textContent.startsWith("⏺")`), true);   // toggled twice → recording again
 });
 
 test("edit gestures (real pointer drags) become model commands", opts, async () => {
@@ -177,7 +177,7 @@ test("the recording on disk replays to the identical model (in a fresh page and 
 test("opened as a plain file, recording falls back to the browser", opts, async () => {
   const p3 = await openPage(chrome, "file://" + path.join(dir, "t.html"));
   await p3.waitFor(`window.daigram && daigram.query({q:"view"}).recording.sink==="browser"`);
-  assert.match(await p3.eval(`document.getElementById("btnRec").title`), /in this browser only/);
+  assert.match(await p3.eval(`document.getElementById("recStatus").title`), /in this browser/);
   assert.equal(page.logs.filter(l => l.startsWith("EXCEPTION")).length, 0, page.logs.join("\n"));
   await p3.close();
 });
@@ -257,10 +257,11 @@ test("draw inside an expanded box: resize it (neighbours make room), add boxes a
   assert.deepEqual(await p.eval(`[ROOT.BOX.p.cw,ROOT.BOX.p.ch]`), [3, 2]);                // collapsed size untouched
   const P2 = await p.eval(`[BOX.p.col,BOX.p.row,BOX.p.cw,BOX.p.ch]`), Q = await p.eval(`[BOX.q.col,BOX.q.row,BOX.q.cw,BOX.q.ch]`);
   assert.ok(Q[0] >= P2[0] + P2[2] || Q[1] >= P2[1] + P2[3], "q was pushed clear: " + JSON.stringify({ P2, Q }));
-  // + Box twice inside, then an arrow between them
+  // + Box twice inside, then an arrow between them. The drags start on the box's margin row (row +1, above the
+  // drawing area) — anywhere inside an expanded box counts, the new box snaps into the drawing area
   for (const dc of [0, 4]) {
     await p.eval(`document.querySelector('.tool[data-tool="box"]').click()`);
-    const [x0, y0] = await cellPt(P2[0] + 1 + dc, P2[1] + 2), [x1, y1] = await cellPt(P2[0] + 2 + dc, P2[1] + 2);
+    const [x0, y0] = await cellPt(P2[0] + 1 + dc, P2[1] + 1), [x1, y1] = await cellPt(P2[0] + 2 + dc, P2[1] + 2);
     await p.drag(x0, y0, x1, y1);
     const a = await last(); assert.equal(a.cmd.op, "addBox"); assert.equal(a.cmd.parent, "p"); assert.deepEqual([a.cmd.col, a.cmd.row], [dc, 0]); assert.equal(a.ok, true);
   }
