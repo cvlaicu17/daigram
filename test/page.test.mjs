@@ -126,6 +126,16 @@ test("resize lever, detail-pane rename and drag-to-reparent are commands too", o
   await click("btnEdit");
 });
 
+test("expanding everything: no overlaps, no red arrows; collapsing restores the exact layout", opts, async () => {
+  const before = await page.eval(`JSON.stringify(daigram.query({q:"view"}).boxes)`);
+  await page.eval(`daigram.dispatch({op:"expandAll"})`);
+  const v = await page.eval(`daigram.query({q:"view"})`);
+  assert.equal(v.warnWires, 0);
+  assert.deepEqual(await page.eval(`DaigramCore.layoutOverlaps(Object.entries(BOX).map(([fid,b])=>({fid,col:b.col,row:b.row,cw:b.cw,ch:b.ch})))`), []);
+  await page.eval(`daigram.dispatch({op:"collapseAll"})`);
+  assert.equal(await page.eval(`JSON.stringify(daigram.query({q:"view"}).boxes)`), before);
+});
+
 test("an agent drives the open page through the server (live link)", opts, async () => {
   const send = body => fetch(`http://127.0.0.1:${srv.port}/api/cmd`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
   const r = await send({ cmds: [{ op: "addBox", id: "agent", n: "From agent", col: 14, row: 9, cw: 3, ch: 2 }, { op: "addWire", from: "agent", to: "g", label: "live" }] });

@@ -231,7 +231,7 @@ function args(argv) {
   const pos = [], opt = {};
   for (let i = 0; i < argv.length; i++) { const a = argv[i];
     if (a === "-o") opt.o = argv[++i];
-    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json", "dry-run"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
+    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json", "dry-run", "force"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
     else pos.push(a); }
   return { pos, opt };
 }
@@ -297,12 +297,15 @@ async function main(argv) {
       return process.exit(failed ? 1 : 0);
     }
     case "upgrade": {
-      if (!pos.length) die("usage: daigram upgrade <diagram.html>... [--template T] [--dry-run]   (in place; keeps CONFIG, title, header, own CSS)");
+      if (!pos.length) die("usage: daigram upgrade <diagram.html>... [--template T] [--dry-run] [--force]   (in place; keeps CONFIG, title, header, own CSS)");
       const tpl = fs.readFileSync(opt.template || TEMPLATE, "utf8"); let bad = 0;
       for (const f of pos) {
         try {
           const old = fs.readFileSync(f, "utf8"), { html, kept } = upgradeHtml(old, tpl);
           const a = loadDiagramHtml(old), b = loadDiagramHtml(html), same = a.core.hash(a.root) === b.core.hash(b.root);
+          const unk = b.core.unknownFields(b.root);   // e.g. a hand-patched engine rendered extra box fields: upgrading would silently drop them
+          if ((unk.box.length || unk.wire.length) && !opt.force) { bad++; console.log(JSON.stringify({ file: f, ok: false, unknownFields: unk,
+            error: "the model uses fields this engine does not render — the old engine was probably patched; not written (--force to upgrade anyway)" })); continue; }
           if (!same) { bad++; console.log(JSON.stringify({ file: f, ok: false, error: "model changed during upgrade — not written" })); continue; }
           const changed = html !== old;
           if (changed && !opt["dry-run"]) fs.writeFileSync(f, html);

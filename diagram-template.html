@@ -73,6 +73,10 @@
   .box.yellow{background:#2a2410;border-color:#e3b341}
   .box.yellow .n{color:#fff3c4} .box.yellow .s{color:#dcc47e}
   .box.sel{box-shadow:0 0 0 2px #f0a35e,0 6px 20px rgba(0,0,0,.5)}
+  /* a box with `code` shows it as a listing under its title (cls "code" left-aligns the box) */
+  .box.code{justify-content:flex-start;align-items:stretch;text-align:left;padding:6px 7px}
+  .box.code .n{font-size:10px;color:#dbeafe;flex:0 0 auto}
+  .codepre{flex:1 1 auto;min-height:0;white-space:pre;overflow:auto;margin:4px 0 0;padding:6px 8px;background:#0b1622;border:1px solid #1d3a52;border-radius:5px;font:10px/1.45 ui-monospace,Menlo,monospace;color:#cfe2f5}
 
   /* resize levers (edit + select) */
   .lever{position:absolute;z-index:6;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;
@@ -278,10 +282,10 @@ function addBoxClasses(names){ for(const n of names)if(/^[A-Za-z][\w-]*$/.test(n
         effect:true = has an outside side effect (download, reload…) and is skipped on replay. ---- */
 const COMMANDS={
   addBox:{doc:"Add a box. Returns {fid}. parent = the box whose sub-canvas receives it (created if missing); omit for the root. id defaults to n0, n1, …",
-    args:{parent:"parent",id:"id",n:"str",s:"str",cls:"cls",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!"}},
+    args:{parent:"parent",id:"id",n:"str",s:"str",cls:"cls",code:"str",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!"}},
   moveBox:{doc:"Move a box within its level (new top-left cell).",args:{id:"fid!",col:"nat!",row:"nat!"}},
   resizeBox:{doc:"Set a box's whole cell rectangle within its level.",args:{id:"fid!",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!"}},
-  setBox:{doc:"Change a box's title (n), subtitle (s) or classes (cls).",args:{id:"fid!",n:"str",s:"str",cls:"cls"}},
+  setBox:{doc:"Change a box's title (n), subtitle (s), classes (cls) or code listing (code; null removes it).",args:{id:"fid!",n:"str",s:"str",cls:"cls",code:"text"}},
   deleteBox:{doc:"Delete a box, its sub-canvas, and every wire touching it.",args:{id:"fid!"}},
   reparentBox:{doc:"Move a box (with its subtree) into another level at (col,row). Wires that would then cross levels are dropped. Returns {fid}.",
     args:{id:"fid!",parent:"parent!",col:"nat!",row:"nat!"}},
@@ -332,6 +336,7 @@ const QUERIES={
   box:{doc:"One box: geometry, props, whether it has a sub-canvas.",args:{id:"fid!"}},
   free:{doc:"Is a cell rectangle free in a level?",args:{parent:"parent",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!",except:"id"}},
   hash:{doc:"Stable hash of the model (used to check replays).",args:{}},
+  layout:{doc:"The expanded view for a set of expanded boxes (all:true = everything): flattened box rects, zones, and any overlapping box pairs (should be none).",args:{expanded:"fids",all:"bool"}},
   view:{view:true,doc:"Live page only: mode, tool, zoom, expanded boxes, displayed geometry, red (unroutable) arrows, recording status.",args:{}},
 };
 
@@ -439,13 +444,13 @@ const OPS={
     const pb=parent?needBox(root,parent):null, D=parent?(pb.sub?normDiag(pb.sub,root.GRID):null):root;
     if(D){ if(c.id!==undefined&&D.BOX[c.id])fail('a box "'+c.id+'" already exists in that level'); checkFree(D,r,null); }
     const L=D||(pb.sub=normDiag({},root.GRID)), id=c.id!==undefined?c.id:freeId(L,"n");
-    L.BOX[id]={n:c.n!==undefined?c.n:"New box",s:c.s||"",cls:c.cls||"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+    L.BOX[id]={n:c.n!==undefined?c.n:"New box",s:c.s||"",cls:c.cls||"",col:r.col,row:r.row,cw:r.cw,ch:r.ch}; if(c.code)L.BOX[id].code=c.code;
     fitGrid(L,r); return {fid:join(parent,id)}; },
   moveBox(root,c){ const b=needBox(root,c.id), p=parentOf(root,c.id), r={col:c.col,row:c.row,cw:b.cw,ch:b.ch};
     checkFree(p.diag,r,p.id); b.col=r.col; b.row=r.row; fitGrid(p.diag,r); },
   resizeBox(root,c){ const b=needBox(root,c.id), p=parentOf(root,c.id), r={col:c.col,row:c.row,cw:c.cw,ch:c.ch};
     checkFree(p.diag,r,p.id); Object.assign(b,r); fitGrid(p.diag,r); },
-  setBox(root,c){ const b=needBox(root,c.id); if(c.n!==undefined)b.n=c.n; if(c.s!==undefined)b.s=c.s; if(c.cls!==undefined)b.cls=c.cls; },
+  setBox(root,c){ const b=needBox(root,c.id); if(c.code!==undefined){ if(c.code===null)delete b.code; else b.code=c.code; } if(c.n!==undefined)b.n=c.n; if(c.s!==undefined)b.s=c.s; if(c.cls!==undefined)b.cls=c.cls; },
   deleteBox(root,c){ needBox(root,c.id); const p=parentOf(root,c.id), gone=inSub(c.id);
     walkWires(root,(D,i,f,t)=>{ if(gone(f)||gone(t))D.W.splice(i,1); });
     delete p.diag.BOX[p.id]; if(p.diag.DESC)delete p.diag.DESC[p.id];
@@ -503,6 +508,93 @@ const OPS={
   load(root,c){ const src=stateRoot(c.state); if(!src)fail("state has neither root nor boxes"); return {root:buildDiagram(src)}; },
 };
 
+/* ---- expanded view layout ("insert space") ----
+   layoutLevel(D, prefix, depth, expanded) lays out one level with every box in `expanded` (a Set of fids)
+   grown to show its sub-canvas, and returns {boxes, wires, zones, w, h}: the flattened level, recursing
+   into open subs, normalized so content starts at (0,0). Only what a grown container actually runs
+   into moves (see reflow). A zone is a rigid group: the boxes (and zones) fully inside it reflow among
+   themselves first, the zone grows to keep its margins, then it is pushed as one piece among its siblings. */
+const NEST_M=1, NEST_HEAD=1, REFLOW_GAP=1;   // container interior margin, header rows, routing channel kept by a push
+/* reflow(items): each item {col,row,cw,ch (current, maybe grown), box (original rect)}. Moves items only
+   right/down. For each pair where B lies right of and/or below A in the ORIGINAL layout, the pair keeps a
+   clearance on an axis they were separated on — min(REFLOW_GAP, their original gap) — so nothing moves
+   unless something grew into it, and originally touching items stay touching. A pair in conflict is
+   resolved by pushing B right or down, whichever is the shorter push (so a box diagonal to a container
+   that grows both ways is handled too). Repeats until stable (pushes cascade). Returns the moves. */
+function reflow(items){
+  const L=items.slice().sort((a,b)=>(a.box.row-b.box.row)||(a.box.col-b.box.col));
+  if(!L.some(e=>e.cw!==e.box.cw||e.ch!==e.box.ch))return;
+  for(let it=0;it<4*L.length+8;it++){ let moved=false;
+    for(const A of L)for(const B of L){ if(A===B)continue;
+      const gc=B.box.col-(A.box.col+A.box.cw), gr=B.box.row-(A.box.row+A.box.ch);   // original gaps (>=0: B after A on that axis)
+      if(gc<0&&gr<0)continue;                                                       // B is not after A — the reverse pair covers it
+      const cc=gc>=0?Math.min(REFLOW_GAP,gc):0, cr=gr>=0?Math.min(REFLOW_GAP,gr):0;
+      const colHit=B.col<A.col+A.cw+cc&&A.col<B.col+B.cw, rowHit=B.row<A.row+A.ch+cr&&A.row<B.row+B.ch;
+      if(!colHit||!rowHit)continue;
+      const right=gc>=0?A.col+A.cw+cc-B.col:Infinity, down=gr>=0?A.row+A.ch+cr-B.row:Infinity;
+      if(down<=right)shiftItem(B,0,down); else shiftItem(B,right,0);
+      moved=true; }
+    if(!moved)return; }
+}
+function shiftItem(e,dc,dr){ e.col+=dc; e.row+=dr; if(e.kids)e.kids.forEach(k=>shiftItem(k,dc,dr)); }
+const rectIn=(a,z)=>a.col>=z.col&&a.row>=z.row&&a.col+a.cw<=z.col+z.cw&&a.row+a.ch<=z.row+z.ch;
+// Lay out a group (a zone, or the whole level): inner zones first, then reflow the members; a zone then
+// grows so its members keep their original right/bottom margins.
+function layoutGroup(G){
+  G.kids.forEach(k=>{ if(k.kids)layoutGroup(k); });
+  reflow(G.kids);
+  if(!G.box||!G.kids.length)return;
+  const ext=(f,list)=>Math.max(...list.map(f));
+  const r0=ext(k=>k.box.col+k.box.cw,G.kids), b0=ext(k=>k.box.row+k.box.ch,G.kids);
+  const r1=ext(k=>k.col+k.cw,G.kids),        b1=ext(k=>k.row+k.ch,G.kids);
+  G.cw=G.box.cw+Math.max(0,r1-r0); G.ch=G.box.ch+Math.max(0,b1-b0);
+}
+function layoutLevel(D,prefix,depth,expanded,g){
+  D=normDiag(D,g); g=g||D.GRID;
+  const eff={};
+  for(const id in D.BOX){ const b=D.BOX[id];
+    eff[id]={fid:prefix+id,id,col:b.col,row:b.row,cw:b.cw,ch:b.ch,box:b,hasSub:!!b.sub,container:false}; }
+  for(const id in eff){ const e=eff[id];
+    if(e.hasSub&&expanded.has(e.fid)){
+      const ch=layoutLevel(e.box.sub,e.fid+"/",depth+1,expanded,g);
+      e._child=ch; e.container=true;
+      e.cw=Math.max(e.box.cw,ch.w+2*NEST_M);
+      e.ch=Math.max(e.box.ch,NEST_HEAD+ch.h+2*NEST_M);
+    } }
+  // group tree: each box / zone belongs to the smallest zone that fully contains it (ties: earlier zone wins)
+  const zs=D.ZONES.map((z,i)=>({zi:i,z,box:{col:z.col,row:z.row,cw:z.cw,ch:z.ch},col:z.col,row:z.row,cw:z.cw,ch:z.ch,kids:[]}));
+  const area=r=>r.cw*r.ch, top={kids:[]};
+  const holder=(rect,self)=>{ let best=null;
+    for(const G of zs){ if(G===self||!rectIn(rect,G.box))continue;
+      if(self&&!(area(G.box)>area(self.box)||(area(G.box)===area(self.box)&&G.zi<self.zi)))continue;
+      if(!best||area(G.box)<area(best.box))best=G; }
+    return best||top; };
+  zs.forEach(G=>holder(G.box,G).kids.push(G));
+  for(const id in eff)holder(eff[id].box,null).kids.push(eff[id]);
+  layoutGroup(top);
+  let boxes=[], wires=[], zones=[];
+  for(const id in eff){ const e=eff[id];
+    boxes.push({fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
+      n:e.box.n,s:e.box.s,cls:e.box.cls,code:e.box.code,desc:D.DESC[id],_basebox:e.box,_diag:D});   // back-refs for editing the model
+    if(e.container){ const oc=e.col+NEST_M, orow=e.row+NEST_HEAD+NEST_M;
+      for(const cb of e._child.boxes) boxes.push(Object.assign({},cb,{col:cb.col+oc,row:cb.row+orow}));
+      for(const w of e._child.wires) wires.push(w);
+      for(const z of e._child.zones) zones.push(Object.assign({},z,{col:z.col+oc,row:z.row+orow}));
+    } }
+  for(let wi=0;wi<D.W.length;wi++){ const w=D.W[wi]; wires.push({from:prefix+w.from,to:prefix+w.to,label:w.label,style:w.style,path:w.path,fromSide:w.fromSide,toSide:w.toSide,_srcW:D.W,_srcI:wi}); }
+  for(const G of zs)zones.push({col:G.col,row:G.row,cw:G.cw,ch:G.ch,label:G.z.label,kind:G.z.kind});
+  let minC=Infinity,minR=Infinity,maxC=0,maxR=0;
+  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
+  boxes.forEach(b=>acc(b.col,b.row,b.cw,b.ch)); zones.forEach(z=>acc(z.col,z.row,z.cw,z.ch));
+  if(!isFinite(minC)){minC=0;minR=0;maxC=0;maxR=0;}
+  boxes.forEach(b=>{b.col-=minC;b.row-=minR;}); zones.forEach(z=>{z.col-=minC;z.row-=minR;});
+  return {boxes,wires,zones,w:maxC-minC,h:maxR-minR};
+}
+// Overlapping pairs in a flattened layout (a box may only overlap its own ancestors/descendants).
+function layoutOverlaps(boxes){ const out=[], kin=(a,b)=>a.indexOf(b+"/")===0||b.indexOf(a+"/")===0;
+  for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){ const a=boxes[i],b=boxes[j];
+    if(!kin(a.fid,b.fid)&&overlaps(a,b))out.push([a.fid,b.fid]); } return out; }
+
 /* apply(root, cmd) -> {ok:true, …result} | {ok:false, error}. A load returns the new tree as .root. */
 function apply(root,cmd){
   const err=validate(COMMANDS,cmd,"op"); if(err)return {ok:false,error:err};
@@ -520,10 +612,13 @@ const QOPS={
   commands:()=>catalog(),
   tree:root=>serializeDiagram(root),
   level:(root,q)=>levelInfo(root,q.parent||""),
-  box:(root,q)=>{ const b=needBox(root,q.id); const o={fid:q.id,n:b.n,s:b.s||"",cls:b.cls||"",col:b.col,row:b.row,cw:b.cw,ch:b.ch,hasSub:!!b.sub};
+  box:(root,q)=>{ const b=needBox(root,q.id); const o={fid:q.id,n:b.n,s:b.s||"",cls:b.cls||"",col:b.col,row:b.row,cw:b.cw,ch:b.ch,hasSub:!!b.sub}; if(b.code)o.code=b.code;
     if(b.sub)o.children=Object.keys(b.sub.BOX||{}); return o; },
   free:(root,q)=>{ const D=needLevel(root,q.parent), k=hitSibling(D,q,q.except===undefined?null:q.except); return {free:k===null,overlaps:k}; },
   hash:root=>({hash:hash(root)}),
+  layout:(root,q)=>{ const ex=new Set(q.all?allSubFids(root,"",[]):(q.expanded||[])), L=layoutLevel(root,"",0,ex,root.GRID);
+    return {expanded:[...ex],w:L.w,h:L.h,boxes:L.boxes.map(b=>({fid:b.fid,col:b.col,row:b.row,cw:b.cw,ch:b.ch,container:b.container})),
+      zones:L.zones.map(z=>({label:z.label,col:z.col,row:z.row,cw:z.cw,ch:z.ch})),overlaps:layoutOverlaps(L.boxes)}; },
 };
 function query(root,q){ const err=validate(QUERIES,q,"q"); if(err)return {ok:false,error:err};
   if(QUERIES[q.q].view)return {ok:false,error:q.q+": a view query — it only works in a live page"};
@@ -531,7 +626,13 @@ function query(root,q){ const err=validate(QUERIES,q,"q"); if(err)return {ok:fal
   try{ return Object.assign({ok:true},QOPS[q.q](root,q)); }
   catch(e){ if(e&&e.cmdError)return {ok:false,error:q.q+": "+e.message}; throw e; } }
 
-return {VERSION,COMMANDS,QUERIES,TYPES,validate,catalog,apply,query,hash,boxClassesInCss,addBoxClasses,normDiag,boxByFid,parentOf,allSubFids,
+const BOX_FIELDS=["n","s","cls","code","col","row","cw","ch","sub"], WIRE_FIELDS=["from","to","label","style","path","fromSide","toSide"];
+// Model fields this engine doesn't know (e.g. added by a hand-patched engine) — {box:[…], wire:[…]}.
+function unknownFields(root){ const bx=new Set(), wx=new Set();
+  (function walk(D){ for(const k in D.BOX||{}){ const b=D.BOX[k]; for(const x in b)if(!BOX_FIELDS.includes(x))bx.add(x); if(b.sub)walk(b.sub); }
+    (D.W||[]).forEach(w=>{ for(const x in w)if(!WIRE_FIELDS.includes(x))wx.add(x); }); })(root);
+  return {box:[...bx],wire:[...wx]}; }
+return {VERSION,unknownFields,COMMANDS,QUERIES,TYPES,validate,catalog,apply,query,hash,boxClassesInCss,addBoxClasses,layoutLevel,layoutOverlaps,NEST_M,NEST_HEAD,normDiag,boxByFid,parentOf,allSubFids,
         serializeDiagram,buildDiagram,stateRoot,configText,spliceConfig,touches};
 })();
 </script>
@@ -603,66 +704,15 @@ let FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:
    container boxes) fed to the same renderer/router. EXPANDED holds the open fids. */
 let ROOT={GRID,BOX,W,ZONES,DESC,FLOWS};
 let EXPANDED=new Set();                    // open fids, e.g. "b", "b/h3"
-const NEST_M=1, NEST_HEAD=1;               // container interior margin + header rows
+const NEST_M=DaigramCore.NEST_M, NEST_HEAD=DaigramCore.NEST_HEAD;   // container interior margin + header rows
 const normDiag=d=>DaigramCore.normDiag(d,ROOT&&ROOT.GRID);
 const allSubFids=(D,prefix,out)=>DaigramCore.allSubFids(D,prefix,out);
 
-/* Lay out one diagram level -> {boxes:[{fid,id,col,row,cw,ch,depth,container,hasSub,n,s,cls,desc}],
-   wires, zones, w, h}; coords normalized so content starts at (0,0). Recurses into open subs. */
-function layoutLevel(D, prefix, depth){
-  D=normDiag(D);
-  const eff={};
-  for(const id in D.BOX){ const b=D.BOX[id];
-    eff[id]={fid:prefix+id,id,col:b.col,row:b.row,cw:b.cw,ch:b.ch,box:b,hasSub:!!b.sub,container:false}; }
-  const order=Object.keys(eff).sort((a,b)=>(eff[a].row-eff[b].row)||(eff[a].col-eff[b].col));
-  for(const id of order){ const e=eff[id];
-    if(e.hasSub && EXPANDED.has(e.fid)){
-      const ch=layoutLevel(e.box.sub, e.fid+"/", depth+1);
-      e._child=ch; e.container=true;
-      e.cw=Math.max(e.box.cw, ch.w+2*NEST_M);
-      e.ch=Math.max(e.box.ch, NEST_HEAD+ch.h+2*NEST_M);
-    } }
-  // Minimal insert-space reflow: only boxes that actually share a band with a grown container
-  // move, and only by the amount that clears it plus a 1-cell channel gap (using whatever slack —
-  // pre-existing gap — they already had) — instead of shifting everything past the box's old edge
-  // by the same flat delta. Cascades in one sweep per axis (growth only ever pushes things later,
-  // never earlier, so original position order is a valid dependency order). Each axis uses the
-  // ORIGINAL (pre-growth) extents on the OTHER axis to decide whether a pair was ever side-by-side
-  // vs stacked, so a box that only grew taller gets handled by the row sweep, never nudged
-  // sideways by the column one.
-  const REFLOW_GAP=1;
-  function packAxis(axis){
-    const other=axis==="col"?"row":"col", sz=axis==="col"?"cw":"ch", osz=axis==="col"?"ch":"cw";
-    const ids=Object.keys(eff).sort((a,b)=>eff[a][axis]-eff[b][axis]);
-    for(let i=0;i<ids.length;i++){ const e=eff[ids[i]]; let pos=e[axis];
-      for(let j=0;j<i;j++){ const o=eff[ids[j]];
-        if(o.box[other]<e.box[other]+e.box[osz] && o.box[other]+o.box[osz]>e.box[other]) pos=Math.max(pos,o[axis]+o[sz]+REFLOW_GAP);
-      }
-      e[axis]=pos;
-    }
-  }
-  packAxis("col"); packAxis("row");
-  let boxes=[], wires=[], zones=[];
-  for(const id in eff){ const e=eff[id];
-    boxes.push({fid:e.fid,id:e.id,col:e.col,row:e.row,cw:e.cw,ch:e.ch,depth,container:e.container,hasSub:e.hasSub,
-      n:e.box.n,s:e.box.s,cls:e.box.cls,desc:D.DESC[id],_basebox:e.box,_diag:D});   // back-refs for editing the model
-    if(e.container){ const oc=e.col+NEST_M, orow=e.row+NEST_HEAD+NEST_M;
-      for(const cb of e._child.boxes) boxes.push({...cb, col:cb.col+oc, row:cb.row+orow});
-      for(const w of e._child.wires) wires.push(w);
-      for(const z of e._child.zones) zones.push({...z, col:z.col+oc, row:z.row+orow});
-    } }
-  for(let wi=0;wi<D.W.length;wi++){ const w=D.W[wi]; wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style, path:w.path, fromSide:w.fromSide, toSide:w.toSide, _srcW:D.W, _srcI:wi}); }
-  for(const z of D.ZONES) zones.push({col:z.col,row:z.row,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
-  let minC=Infinity,minR=Infinity,maxC=0,maxR=0;
-  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
-  boxes.forEach(b=>acc(b.col,b.row,b.cw,b.ch)); zones.forEach(z=>acc(z.col,z.row,z.cw,z.ch));
-  if(!isFinite(minC)){minC=0;minR=0;}
-  boxes.forEach(b=>{b.col-=minC;b.row-=minR;}); zones.forEach(z=>{z.col-=minC;z.row-=minR;});
-  return {boxes,wires,zones,w:maxC-minC,h:maxR-minR};
-}
+// The expanded-view layout lives in the core (DOM-free, testable headless): DaigramCore.layoutLevel.
+const layoutLevel=(D,prefix,depth)=>DaigramCore.layoutLevel(D,prefix,depth,EXPANDED,ROOT.GRID);
 function buildDisplay(){
   const L=layoutLevel(ROOT,"",0), M=2, BOXd={}, Wd=[], Zd=[], Dd={};
-  for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
+  for(const b of L.boxes){ BOXd[b.fid]={n:b.n,s:b.s,cls:b.cls,code:b.code,col:b.col+M,row:b.row+M,cw:b.cw,ch:b.ch,
     _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,
     _base:b._basebox,_diag:b._diag,_ox:(b.col+M)-b._basebox.col,_oy:(b.row+M)-b._basebox.row};   // exact display→base: base = display − _o
     if(b.desc)Dd[b.fid]=b.desc; }
@@ -877,7 +927,7 @@ function buildBoxes(){
   for(const id in BOX){const b=BOX[id];
     const el=document.createElement("div");
     el.className="box"+(b.cls?(" "+b.cls):""); el.id="box-"+id; el.dataset.id=id; el.tabIndex=0;
-    el.innerHTML=`<div class="n"></div>`+`<div class="s"></div>`;
+    el.innerHTML=`<div class="n"></div>`+`<div class="s"></div>`+(b.code?`<pre class="codepre"></pre>`:"");
     const exp=document.createElement("button"); exp.className="boxexp"; exp.type="button";
     exp.addEventListener("click",e=>{e.stopPropagation();boxExpandBtn(id);});
     bindStart(exp,e=>{e.stopPropagation();});   // don't start a move/resize from the expand button
@@ -890,7 +940,7 @@ function buildBoxes(){
 function layoutBoxes(){
   for(const id in BOX){const b=BOX[id],el=boxEls[id]; if(!el)continue; const R=boxRect(b);
     el.style.left=R.x+"px";el.style.top=R.y+"px";el.style.width=R.w+"px";el.style.height=R.h+"px";
-    el.querySelector(".n").textContent=b.n; el.querySelector(".s").textContent=b.s||"";
+    el.querySelector(".n").textContent=b.n; el.querySelector(".s").textContent=b.s||""; { const p=el.querySelector(".codepre"); if(p)p.textContent=b.code||""; }
     el.querySelector(".s").style.display=b.s?"":"none";
     el.title=b.n+(b.s?" — "+b.s:"");
     const has=(b._hasSub!==undefined?b._hasSub:!!b.sub), isC=!!b._container, exp=el.querySelector(".boxexp");

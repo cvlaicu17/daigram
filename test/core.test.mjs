@@ -191,3 +191,82 @@ test("upgrade swaps the engine but keeps CONFIG, title, header, BUILD and the pa
   assert.equal(b.core.hash(b.root), a.core.hash(a.root));
   assert.equal(upgradeHtml(html, tpl).html, html);   // idempotent
 });
+
+/* ---- expand reflow (task 2.1) ---- */
+const lay = (core, root, expanded) => { const r = core.query(root, { q: "layout", expanded }); assert.equal(r.ok, true, r.error);
+  return Object.assign(r, { at: Object.fromEntries(r.boxes.map(b => [b.fid, [b.col, b.row, b.cw, b.ch]])) }); };
+// a level built from compact specs: {id:[col,row,cw,ch, sub?]} — sub = a list of [cols,rows] content size
+function level(core, spec, zones = []) {
+  const root = core.normDiag({ GRID: { cols: 40, rows: 30, cell: 64, gap: 5 } });
+  for (const [id, [col, row, cw, ch, inner]] of Object.entries(spec)) {
+    root.BOX[id] = { n: id, s: "", cls: "", col, row, cw, ch };
+    if (inner) root.BOX[id].sub = core.normDiag({ BOX: { x: { n: "x", s: "", cls: "", col: 0, row: 0, cw: inner[0], ch: inner[1] } } });
+  }
+  root.ZONES = zones.map(([col, row, cw, ch]) => ({ col, row, cw, ch, label: "", kind: "" }));
+  return root;
+}
+
+test("reflow: nothing expanded → nothing moves; the sample with everything expanded has no overlaps", () => {
+  const { core, root } = fresh();
+  const base = lay(core, root, []), all = core.query(root, { q: "layout", all: true });
+  for (const id of Object.keys(root.BOX)) assert.deepEqual(plain(base.at[id].slice(2)), [root.BOX[id].cw, root.BOX[id].ch]);
+  assert.deepEqual(plain(all.overlaps), []);
+});
+
+test("reflow: a box diagonal to a container that grows both ways is pushed (the old Output-G bug), by the shorter push", () => {
+  const { core } = fresh();
+  const root = level(core, { p: [0, 0, 2, 2, [10, 3]], y: [4, 3, 2, 2] });   // p grows to 12x6; y sits diagonally
+  const r = lay(core, root, ["p"]);
+  assert.deepEqual(plain(r.overlaps), []);
+  assert.deepEqual(plain(r.at.p), [0, 0, 12, 6]);
+  assert.deepEqual(plain(r.at.y), [4, 7, 2, 2]);   // down by 4 (to row 6 + 1-cell channel) beats right by 9
+});
+
+test("reflow: only what the container runs into moves; touching boxes stay touching, gaps shrink to 1 at most", () => {
+  const { core } = fresh();
+  const root = level(core, { p: [0, 0, 2, 2, [6, 1]], q: [10, 0, 3, 2], r: [13, 0, 3, 2], far: [0, 10, 2, 2] });
+  let L = lay(core, root, ["p"]);                      // p grows to 8 wide: still short of q (col 10)
+  assert.deepEqual(plain([L.at.q, L.at.r, L.at.far]), [[10, 0, 3, 2], [13, 0, 3, 2], [0, 10, 2, 2]]);
+  root.BOX.p.sub.BOX.x.cw = 12;                        // now p (14 wide) runs into q
+  L = lay(core, root, ["p"]);
+  assert.deepEqual(plain(L.at.q), [15, 0, 3, 2]);      // pushed to p's right edge + 1-cell channel
+  assert.deepEqual(plain(L.at.r), [18, 0, 3, 2]);      // r was touching q: still touching
+  assert.deepEqual(plain(L.at.far), [0, 10, 2, 2]);    // below p but out of its way: untouched
+});
+
+test("reflow: a zone moves as one rigid group and grows around its own expanding member", () => {
+  const { core } = fresh();
+  const root = level(core, { p: [1, 1, 2, 2, [10, 3]], m1: [6, 1, 2, 2], m2: [6, 4, 2, 2] }, [[0, 0, 4, 4], [5, 0, 4, 7]]);
+  const L = lay(core, root, ["p"]);
+  assert.deepEqual(plain(L.overlaps), []);
+  const dz = L.at.m1[0] - 6;                            // the right zone's members moved by the same delta
+  assert.ok(dz > 0); assert.equal(L.at.m2[0] - 6, dz); assert.equal(L.at.m1[1], 1); assert.equal(L.at.m2[1], 4);
+  const [zl, zr] = L.zones;                             // left zone wraps grown p with its margins; right zone shifted, same size
+  assert.deepEqual(plain([zl.col, zl.row, zl.cw, zl.ch]), [0, 0, 14, 8]);
+  assert.deepEqual(plain([zr.col - dz, zr.row, zr.cw, zr.ch]), [5, 0, 4, 7]);
+  assert.ok(zr.col >= zl.col + zl.cw);                  // zones don't overlap either
+});
+
+test("every expansion of every bundled diagram is overlap-free", () => {
+  for (const f of [TEMPLATE, path.join(ROOT_DIR, "examples", "example-webapp.html")]) {
+    const d = loadDiagramHtml(fs.readFileSync(f, "utf8")), subs = d.core.allSubFids(d.root, "", []);
+    for (const ex of [subs, ...subs.map(s => s.split("/").map((_, i, a) => a.slice(0, i + 1).join("/")))])
+      assert.deepEqual(plain(d.core.query(d.root, { q: "layout", expanded: ex }).overlaps), [], f + " " + ex);
+  }
+});
+
+test("code listings are a box field; upgrade refuses to drop fields this engine doesn't know", async () => {
+  const { upgradeHtml } = await import("../daigram.mjs");
+  const d = fresh();
+  ok(d.core.apply(d.root, { op: "addBox", n: "Main.java", cls: "code", code: "class Main {}", col: 1, row: 12, cw: 4, ch: 3 }));
+  ok(d.core.apply(d.root, { op: "setBox", id: "n0", code: "class Main { }" }));
+  assert.equal(ok(d.core.query(d.root, { q: "box", id: "n0" })).code, "class Main { }");
+  ok(d.core.apply(d.root, { op: "setBox", id: "n0", code: null })); assert.equal(d.root.BOX.n0.code, undefined);
+  d.root.BOX.a.shape = "cloud";   // a field only some patched engine understood
+  assert.deepEqual(plain(d.core.unknownFields(d.root)), { box: ["shape"], wire: [] });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dg-up-")), f = path.join(dir, "x.html");
+  fs.writeFileSync(f, d.core.spliceConfig(fs.readFileSync(TEMPLATE, "utf8"), d.root));
+  const r = spawnSync("node", [path.join(ROOT_DIR, "daigram.mjs"), "upgrade", f], { encoding: "utf8" });
+  assert.equal(r.status, 1); assert.match(r.stdout, /unknownFields/);
+  assert.ok(upgradeHtml(fs.readFileSync(f, "utf8"), fs.readFileSync(TEMPLATE, "utf8")).html);   // the library call itself still works (--force path)
+});

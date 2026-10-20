@@ -27,6 +27,11 @@ visual editor.
   boxes aside ("insert space"). Multiple boxes open at once, recursively — **⤢ Expand all** shows the
   whole hierarchy on one canvas; **⤡** collapses. Expansion is a view overlay (the base tree stays
   editable in Edit mode); the flattened display reuses the same router/zoom/pan.
+  - **Only what's in the way moves:** a grown container pushes a box only if it would overlap it or
+    come closer than a 1-cell routing channel (boxes that were touching stay touching), right or down —
+    whichever is the shorter push. A **zone moves as one rigid group** and grows around its own members.
+    Check any expansion with `{"q":"layout","all":true}` → `overlaps` (always empty).
+- **Code listings** — a box with `code:"…"` (and `cls:"code"`) shows it as a monospace listing under its title.
   - **Cross-subtree wires** — a wire in any level's `W` may reference a *descendant* by slash-path
     (`{from:"p1/childA", to:"p2/childB"}`, declared at the common ancestor). It renders **only when
     both endpoints are visible** — i.e. when both parents are expanded — so you can draw child↔child
