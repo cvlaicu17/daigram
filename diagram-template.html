@@ -364,7 +364,7 @@ const COMMANDS={
   setBox:{doc:"Change a box's props: title n, subtitle s, classes cls, UML kind (shape), stereotype, attrs / ops (class compartments; state activities; enum literals; object slots), abstract, acts (lifeline activation bars), code listing. null removes.",
     args:{id:"fid!",n:"str",s:"str",cls:"cls",kind:"boxKind",stereo:"text",attrs:"texts",ops:"texts",abstract:"bool",acts:"spans",code:"text"}},
   deleteBox:{doc:"Delete a box, its sub-canvas, and every wire touching it.",args:{id:"fid!"}},
-  reparentBox:{doc:"Move a box (with its subtree) into another level at (col,row). Wires that would then cross levels are dropped. Returns {fid}.",
+  reparentBox:{doc:"Move a box (with its subtree) into another level at (col,row). Arrows attached to it are kept: re-attached to its new path and stored at the level that now joins their two ends (an explicit path/row, being level-local, is dropped → auto-routed). Returns {fid}.",
     args:{id:"fid!",parent:"parent!",col:"nat!",row:"nat!"}},
   setOpenSize:{doc:"Set the EXPANDED size of a box with a sub-canvas: cw x ch = the drawing area inside it (cells), separate from its collapsed cw/ch. col/row optionally move the box. The sub-canvas is then shown at its own coordinates (not re-centred), so drawing inside never shifts what is there; the first call re-bases existing content to (0,0).",
     args:{id:"fid!",cw:"pos!",ch:"pos!",col:"nat",row:"nat"}},
@@ -555,14 +555,17 @@ const OPS={
     const tb=c.parent?needBox(root,c.parent):null, td=c.parent?(tb.sub?normDiag(tb.sub,root.GRID):null):root, r={col:c.col,row:c.row,cw:b.cw,ch:b.ch};
     if(td===src.diag){ checkFree(td,r,src.id); b.col=r.col; b.row=r.row; fitGrid(td,r); return {fid:c.id}; }   // same level: plain move, wires kept
     if(td)checkFree(td,r,null);
-    // only wires wholly inside the moved subtree's own levels survive; anything crossing (or pointing into it from above) is dropped
-    walkWires(root,(D,i,f,t,pre)=>{ const fi=inMoved(f),ti=inMoved(t); if(fi!==ti||(fi&&ti&&!inMoved(pre)))D.W.splice(i,1); });
+    // arrows touching the subtree from levels OUTSIDE it are lifted out, then re-attached after the move (those inside move along)
+    const lifted=[];
+    walkWires(root,(D,i,f,t,pre)=>{ if(inMoved(pre)||!(inMoved(f)||inMoved(t)))return; lifted.unshift({w:D.W[i],f,t}); D.W.splice(i,1); });
     const desc=src.diag.DESC&&src.diag.DESC[src.id];
     delete src.diag.BOX[src.id]; if(src.diag.DESC)delete src.diag.DESC[src.id];
     const L=td||(tb.sub=normDiag({},root.GRID)), nid=uniqueId(L,src.id);
     b.col=r.col; b.row=r.row; L.BOX[nid]=b; if(desc)L.DESC[nid]=desc; fitGrid(L,r);
-    const fid=join(c.parent,nid); remapFlows(root,n=>inMoved(n)?fid+n.slice(c.id.length):n);
-    return {fid}; },
+    const fid=join(c.parent,nid), moved=n=>inMoved(n)?fid+n.slice(c.id.length):n; remapFlows(root,moved);
+    for(const {w,f,t} of lifted){ const nf=moved(f), nt=moved(t), s=splitAt(nf,nt,commonDepth(nf,nt)), D=s.anc?normDiag(boxByFid(root,s.anc).sub,root.GRID):root;
+      const nw=Object.assign({},w,{from:s.lf,to:s.lt}); delete nw.path; delete nw.row; if(nf===nt)continue; D.W.push(nw); }
+    return {fid,rewired:lifted.length}; },
   addSub(root,c){ const b=needBox(root,c.id); if(b.sub)fail('box "'+c.id+'" already has a sub-canvas'); b.sub=normDiag({},root.GRID); b.ecw=OPEN_DEFAULT[0]; b.ech=OPEN_DEFAULT[1]; },
   setOpenSize(root,c){ const b=needBox(root,c.id); if(!b.sub)fail('box "'+c.id+'" has no sub-canvas (addSub first)');
     const S=normDiag(b.sub,root.GRID); let shift=[0,0];
@@ -1426,7 +1429,7 @@ function renderKeepView(){ const w=stageWrap,sl=w.scrollLeft,st=w.scrollTop,f=fi
 // Restore selection + resize handles after an edit-triggered render (render() clears them).
 function reselect(id){ if(!BOX[id])return; selBox=id; for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id); }
 // Re-parent the box at oldFid into the container targetFid, placing it at the display cell (dropC,dropR).
-// The command drops wires that would cross levels and the page remaps EXPANDED for the moved subtree.
+// The command keeps its arrows (re-attached at the right level); the page remaps EXPANDED for the moved subtree.
 function reparentInto(oldFid,targetFid,dropC,dropR){
   const [col,row]=toLocal(targetFid,dropC,dropR);
   const res=dispatch({op:"reparentBox",id:oldFid,parent:targetFid,col,row},{src:"ui"});

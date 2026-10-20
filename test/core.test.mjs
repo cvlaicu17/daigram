@@ -83,7 +83,7 @@ test("deleteBox prunes every wire that touches the subtree, at any level, and fl
   assert.equal(root.DESC.b, undefined);
 });
 
-test("reparentBox moves a subtree, keeps its inner wires, drops crossing ones, remaps flows", () => {
+test("reparentBox moves a subtree, keeps its inner wires, re-attaches the ones crossing out of it, remaps flows", () => {
   const { core, root } = fresh();
   ok(core.apply(root, { op: "addSub", id: "c" }));
   ok(core.apply(root, { op: "addFlow", label: "deep", nodes: ["b/h3/w1"] }));
@@ -91,7 +91,8 @@ test("reparentBox moves a subtree, keeps its inner wires, drops crossing ones, r
   assert.equal(r.fid, "c/h3");
   assert.equal(root.BOX.b.sub.BOX.h3, undefined);
   assert.ok(root.BOX.c.sub.BOX.h3.sub.W.some(w => w.from === "w1" && w.to === "w2"));   // inner wire survives
-  assert.ok(!root.BOX.b.sub.W.some(w => w.to === "h3"));                                  // h2 -> h3 crossed levels: dropped
+  assert.ok(!root.BOX.b.sub.W.some(w => w.to === "h3"));                                  // h2 -> h3 left b's level…
+  assert.deepEqual(plain(root.W.filter(w => w.to === "c/h3").map(w => [w.from, w.label])), [["b/h2", "write"]]);   // …and now lives at the root, label kept
   assert.deepEqual(plain(root.FLOWS.find(f => f.label === "deep").nodes), ["c/h3/w1"]);
   assert.equal(root.BOX.b.sub.DESC.h3, undefined);
   assert.ok(root.BOX.c.sub.DESC.h3);
@@ -400,4 +401,20 @@ test("setOpenSize on an auto-fit box re-bases its content so nothing moves on sc
   const r = ok(core.apply(root, { op: "setOpenSize", id: "b", cw: 20, ch: 8 }));
   assert.deepEqual(plain(r.rebased), [0, -2]);
   assert.deepEqual(pos(lay(core, root, ["b"])), before);
+});
+
+test("arrows travel across levels: stored at the common ancestor, kept when an end is re-parented", () => {
+  const { core, root } = fresh();
+  ok(core.apply(root, { op: "addBox", parent: "c", id: "x", n: "X", col: 1, row: 1, cw: 3, ch: 2 }));
+  assert.equal(ok(core.apply(root, { op: "addWire", from: "b/h2", to: "c/x", label: "cross", kind: "dependency" })).level, "");
+  assert.equal(ok(core.apply(root, { op: "addWire", from: "b/h1", to: "b/h3/w2", label: "into" })).level, "b");
+  const seen = ex => plain(core.query(root, { q: "layout", expanded: ex }).boxes.map(b => b.fid));
+  const shown = (ex, from, to) => seen(ex).includes(from) && seen(ex).includes(to);   // the page draws a wire iff both ends are displayed
+  assert.equal(shown([], "b/h2", "c/x"), false); assert.equal(shown(["b"], "b/h2", "c/x"), false); assert.equal(shown(["b", "c"], "b/h2", "c/x"), true);
+  assert.equal(shown(["b"], "b/h1", "b/h3/w2"), false); assert.equal(shown(["b", "b/h3"], "b/h1", "b/h3/w2"), true);
+  ok(core.apply(root, { op: "reparentBox", id: "c/x", parent: "b", col: 1, row: 6 }));       // x moves next to h2 → the arrow becomes local to b
+  assert.deepEqual(plain(root.BOX.b.sub.W.filter(w => w.label === "cross")), [{ from: "h2", to: "x", label: "cross", kind: "dependency" }]);
+  assert.equal(root.W.some(w => w.label === "cross"), false);
+  ok(core.apply(root, { op: "reparentBox", id: "b/h1", parent: "", col: 1, row: 12 }));      // h1 leaves b → its arrow into b/h3 goes up to the root
+  assert.deepEqual(plain(root.W.filter(w => w.label === "into").map(w => [w.from, w.to])), [["h1", "b/h3/w2"]]);
 });

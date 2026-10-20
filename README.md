@@ -40,6 +40,8 @@ visual editor.
     (`{from:"p1/childA", to:"p2/childB"}`, declared at the common ancestor). It renders **only when
     both endpoints are visible** — i.e. when both parents are expanded — so you can draw child↔child
     links between two different containers that appear once you drill into both.
+    Draw one in Edit mode with **+ Arrow** between boxes of two expanded containers. Moving a box into another
+    container keeps its arrows (they're re-attached at the level that now joins both ends).
 - **Zoom** (+/−, Fit), a **details pane**, named **Flow** highlight buttons, **zones** (grouping rectangles).
 - **Persistence** — autosaves to `localStorage`, plus Export/Import JSON. A build stamp
   means a newer copy of the file ignores stale saved layouts.

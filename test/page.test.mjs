@@ -275,3 +275,32 @@ test("draw inside an expanded box: resize it (neighbours make room), add boxes a
   assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
   await p.close();
 });
+
+test("cross-level arrows: drawn only when both ends are displayed; drawn and deleted with the mouse", opts, async () => {
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/t.html`);
+  await p.send("Emulation.setDeviceMetricsOverride", { width: 1800, height: 1300, deviceScaleFactor: 1, mobile: false });
+  await p.waitFor(`window.daigram`);
+  await p.eval(`try{localStorage.clear()}catch(_){}; daigram.dispatch({op:"collapseAll"})`);
+  assert.equal((await p.eval(`daigram.batch([{op:"addBox",parent:"c",id:"x",n:"X",col:1,row:1,cw:3,ch:2},
+    {op:"addWire",from:"a",to:"b/h1",label:"W1"},{op:"addWire",from:"b/h2",to:"c/x",label:"W2"},
+    {op:"addWire",from:"b/h3/w1",to:"c/x",label:"W3"},{op:"addWire",from:"b/h1",to:"b/h3/w2",label:"W4"}])`)).ok, true);
+  const want = { "": [], "b": ["W1"], "c": [], "b,c": ["W1", "W2"], "b,b/h3": ["W1", "W4"], "b,b/h3,c": ["W1", "W2", "W3", "W4"], "b/h3,c": [] };
+  for (const [ex, exp] of Object.entries(want)) {
+    await p.eval(`EXPANDED=new Set(${JSON.stringify(ex ? ex.split(",") : [])}); render();`);
+    assert.deepEqual(await p.eval(`wireNodes.map(n=>W[n.wi].label||"").filter(l=>/^W\\d$/.test(l)).sort()`), exp, "expanded {" + ex + "}");
+    assert.equal(await p.eval(`document.querySelectorAll("path.wire.warn").length`), 0);
+  }
+  await p.eval(`EXPANDED=new Set(["b","c"]); render(); daigram.dispatch({op:"setMode",edit:true}); daigram.dispatch({op:"fit",on:true})`);
+  await p.eval(`document.querySelector('.tool[data-tool="arrow"]').click()`);
+  const [ax, ay] = await p.center("b/h1"), [bx, by] = await p.center("c/x"); await p.drag(ax, ay, bx, by, 14);
+  const last = () => p.eval(`(()=>{const l=daigram.log().filter(e=>e.k==="cmd");return l[l.length-1]})()`);
+  assert.deepEqual((await last()).cmd, { op: "addWire", from: "b/h1", to: "c/x" });
+  assert.equal(await p.eval(`ROOT.W.some(w=>w.from==="b/h1"&&w.to==="c/x")`), true);   // stored at the common ancestor (root)
+  await p.eval(`document.querySelector('.tool[data-tool="del"]').click()`);
+  const mid = await p.eval(`(()=>{const n=wireNodes.find(n=>n.from==="b/h1"&&n.to==="c/x"), q=n.path.getPointAtLength(n.path.getTotalLength()/2), s=stage.getBoundingClientRect(); return [s.left+q.x*zoom, s.top+q.y*zoom]})()`);
+  await p.mouse("mousePressed", mid[0], mid[1]); await p.mouse("mouseReleased", mid[0], mid[1], 0);
+  assert.deepEqual((await last()).cmd, { op: "deleteWire", from: "b/h1", to: "c/x", nth: 0 });
+  assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
+  await p.eval(`daigram.dispatch({op:"setMode",edit:false}); daigram.dispatch({op:"collapseAll"}); localStorage.clear()`);
+  await p.close();
+});
