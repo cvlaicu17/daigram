@@ -23,6 +23,7 @@ before(async () => {
   if (!haveChrome) return;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "dg-page-"));
   fs.copyFileSync(path.join(ROOT_DIR, "diagram-template.html"), path.join(dir, "t.html"));
+  fs.copyFileSync(path.join(ROOT_DIR, "examples", "uml-showcase.html"), path.join(dir, "uml.html"));
   srv = await startServer({ dir, port: 0, quiet: true });
   chrome = await launchChrome();
   page = await openPage(chrome, `http://127.0.0.1:${srv.port}/t.html`);
@@ -110,6 +111,11 @@ test("resize lever, detail-pane rename and drag-to-reparent are commands too", o
   await page.eval(`(()=>{const f=document.getElementById("ef-n");f.value="Renamed G";f.dispatchEvent(new Event("input"));f.dispatchEvent(new Event("change"))})()`);
   assert.deepEqual((await lastCmd()).cmd, { op: "setBox", id: "g", n: "Renamed G" });
   assert.equal((await box("g")).n, "Renamed G");
+  await page.eval(`(()=>{const k=document.getElementById("ef-kind");k.value="usecase";k.dispatchEvent(new Event("change"))})()`);
+  assert.deepEqual((await lastCmd()).cmd, { op: "setBox", id: "g", kind: "usecase" });
+  assert.equal(await page.eval(`document.getElementById("box-g").classList.contains("shaped")`), true);
+  await page.eval(`(()=>{const k=document.getElementById("ef-kind");k.value="box";k.dispatchEvent(new Event("change"))})()`);
+  assert.equal((await box("g")).kind, undefined);
 
   await page.eval(`daigram.dispatch({op:"expand",id:"b"})`);
   await page.eval(`daigram.dispatch({op:"fit",on:true})`);   // the reflow pushes c below the viewport — fit everything on screen
@@ -174,4 +180,33 @@ test("opened as a plain file, recording falls back to the browser", opts, async 
   assert.match(await p3.eval(`document.getElementById("btnRec").title`), /in this browser only/);
   assert.equal(page.logs.filter(l => l.startsWith("EXCEPTION")).length, 0, page.logs.join("\n"));
   await p3.close();
+});
+
+test("the UML showcase renders every shape, marker and zone kind", opts, async () => {
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/uml.html`);
+  await p.waitFor(`window.daigram && document.querySelectorAll(".box").length>40`);
+  const r = await p.eval(`(()=>{ const kinds=Object.values(BOX).map(b=>b.kind||"box");
+    const used=[...document.querySelectorAll("path.wire")].flatMap(e=>[e.getAttribute("marker-end"),e.getAttribute("marker-start")]).filter(Boolean);
+    return { warn:document.querySelectorAll("path.wire.warn").length,
+      decoFilled:[...document.querySelectorAll("svg.deco")].filter(s=>s.innerHTML.trim()).length,
+      needDeco:kinds.filter(k=>!["box","class","interface","enum","datatype","object","state","action"].includes(k)).length,
+      shaped:document.querySelectorAll(".box.shaped").length,
+      markersMissing:used.filter(u=>!document.querySelector(u.slice(4,-1))).length,
+      dashed:document.querySelectorAll("path.wire.dashed").length,
+      endLabels:document.querySelectorAll("text.wlabel.end:not(.bg)").length,
+      zoneKinds:[...new Set([...document.querySelectorAll(".zone")].map(z=>z.className.replace("zone","").trim()))].sort(),
+      dividers:document.querySelectorAll(".zone .zdiv").length,
+      compartments:document.querySelectorAll(".box.k-class .cp:not(.none)").length,
+      stereo:[...document.querySelectorAll(".box .st")].filter(e=>e.style.display!=="none").map(e=>e.textContent) }; })()`);
+  assert.equal(r.warn, 0);
+  assert.equal(r.decoFilled, r.needDeco);           // every non-rectangle kind (and component/artifact icons) drew its outline
+  assert.ok(r.shaped >= 20);
+  assert.equal(r.markersMissing, 0);
+  assert.ok(r.dashed >= 8); assert.ok(r.endLabels >= 4);
+  assert.deepEqual(r.zoneKinds, ["boundary", "frame", "lane"]);
+  assert.equal(r.dividers, 1);
+  assert.equal(r.compartments, 8);                 // 4 classes × attrs + ops
+  for (const t of ["«interface»", "«enumeration»", "«dataType»", "«component»", "«artifact»", "«device»"]) assert.ok(r.stereo.includes(t), t);
+  assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
+  await p.close();
 });

@@ -70,6 +70,19 @@ let FLOWS = [ { label:"Main path", nodes:["a","b"] } ];                // Flow b
 edge-to-edge force arrows to detour. If an arrow draws **dashed red**, open a
 channel or enlarge the grid.
 
+## UML
+Every UML entity is a box `kind`, an arrow `kind` or a zone `kind` — see
+[`examples/uml-showcase.html`](examples/uml-showcase.html), built only from
+[`examples/uml-showcase.cmds.jsonl`](examples/uml-showcase.cmds.jsonl).
+
+| | kinds | extra fields |
+|---|---|---|
+| **boxes** | `class` `interface` `enum` `datatype` `object` `component` `artifact` `package` `node` `note` `actor` `usecase` `state` `action` `initial` `final` `flowfinal` `terminate` `choice` `junction` `history` `fork` `send` `accept` `time` `port` `provided` `required` `lifeline` | `stereo`, `attrs` / `ops` (compartments; state activities; enum literals; object slots), `abstract`, `acts` (lifeline activation bars `[[firstRow,lastRow]]`) |
+| **arrows** | `association` `directed` `dependency` `generalization` `realization` `aggregation` `composition` `containment` `usage` `include` `extend` `sync` `async` `reply` `create` `transition` `anchor` (default `flow` = today's arrow) | `line` / `head` / `tail` override the preset; `fromLabel` / `toLabel` (multiplicity, role); `row` = a horizontal message on that row between side-by-side boxes (`from`=`to`: self-message) |
+| **zones** | `frame` (name tag: `sd`, `alt`, `loop [..]`…), `boundary` (system), `lane` (swimlane) | `dividers: [[row, "[else]"]]` (frame operands) |
+
+Aggregation/composition put the diamond at `from` (the whole). Shapes take their colours from `cls`.
+
 ## Commands — the only way to change a diagram
 Every change goes through **one function, `dispatch(command)`**: toolbar buttons, mouse/touch gestures,
 agents, and replays all build a small JSON command, e.g.

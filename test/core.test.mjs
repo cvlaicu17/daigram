@@ -270,3 +270,64 @@ test("code listings are a box field; upgrade refuses to drop fields this engine 
   assert.equal(r.status, 1); assert.match(r.stdout, /unknownFields/);
   assert.ok(upgradeHtml(fs.readFileSync(f, "utf8"), fs.readFileSync(TEMPLATE, "utf8")).html);   // the library call itself still works (--force path)
 });
+
+/* ---- UML entities (task 2.3) ---- */
+test("UML box kinds and fields are validated and stored minimally", () => {
+  const { core, root } = fresh();
+  ok(core.apply(root, { op: "addBox", id: "k", n: "Klass", kind: "class", abstract: true, stereo: "entity", attrs: ["- a: int"], ops: ["+ f()"], col: 1, row: 12, cw: 4, ch: 3 }));
+  assert.deepEqual(plain(root.BOX.k), { n: "Klass", s: "", cls: "", col: 1, row: 12, cw: 4, ch: 3, kind: "class", stereo: "entity", attrs: ["- a: int"], ops: ["+ f()"], abstract: true });
+  ok(core.apply(root, { op: "setBox", id: "k", kind: "box", abstract: false, stereo: null, attrs: null }));
+  assert.deepEqual(plain(Object.keys(root.BOX.k).sort()), ["ch", "cls", "col", "cw", "n", "ops", "row", "s"]);
+  bad(core.apply(root, { op: "setBox", id: "k", kind: "blob" }), /box kind \(UML shape\)/);
+  bad(core.apply(root, { op: "setBox", id: "k", acts: [[3, 1]] }), /firstRow,lastRow/);
+  for (const kind of core.BOX_KINDS) ok(core.apply(root, { op: "setBox", id: "a", kind }));
+});
+
+test("UML arrow kinds, overrides and end labels", () => {
+  const { core, root } = fresh();
+  ok(core.apply(root, { op: "addWire", from: "a", to: "c", kind: "composition", fromLabel: "1", toLabel: "0..*" }));
+  const w = root.W[root.W.length - 1];
+  assert.deepEqual(plain(core.wireLook(w)), { line: "solid", head: "none", tail: "fdiamond", stereo: "" });
+  ok(core.apply(root, { op: "setWire", from: "a", to: "c", line: "dotted", head: "open" }));
+  assert.deepEqual(plain(core.wireLook(w)), { line: "dotted", head: "open", tail: "fdiamond", stereo: "" });
+  ok(core.apply(root, { op: "setWire", from: "a", to: "c", head: null, kind: "include" }));
+  assert.deepEqual(plain(core.wireLook(w)), { line: "dotted", head: "open", tail: "none", stereo: "«include»" });
+  assert.deepEqual(plain(core.wireLook({})), { line: "solid", head: "arrow", tail: "none", stereo: "" });   // old wires: unchanged look
+  bad(core.apply(root, { op: "addWire", from: "a", to: "c", kind: "inheritance" }), /arrow kind/);
+  bad(core.apply(root, { op: "addWire", from: "a", to: "c", head: "star" }), /arrow-end marker/);
+});
+
+test("row arrows (sequence messages) and self-messages are validated", () => {
+  const { core } = fresh();
+  const root = core.normDiag({ GRID: { cols: 30, rows: 20, cell: 64, gap: 5 } });
+  for (const [id, col] of [["u", 1], ["c", 6], ["s", 11]]) ok(core.apply(root, { op: "addBox", id, kind: "lifeline", col, row: 1, cw: 3, ch: 8 }));
+  ok(core.apply(root, { op: "addWire", from: "u", to: "c", kind: "sync", row: 3 }));
+  ok(core.apply(root, { op: "addWire", from: "s", to: "c", kind: "reply", row: 4 }));   // right to left
+  ok(core.apply(root, { op: "addWire", from: "c", to: "c", label: "self()", row: 5 }));
+  bad(core.apply(root, { op: "addWire", from: "c", to: "c" }), /needs row/);
+  bad(core.apply(root, { op: "addWire", from: "u", to: "c", row: 12 }), /outside box rows/);
+  bad(core.apply(root, { op: "addWire", from: "c", to: "c", row: 8 }), /outside box rows/);   // the loop returns on row 9
+  bad(core.apply(root, { op: "addWire", from: "u", to: "s", row: 3 }), /inside box "c"/);   // c is in the way
+  bad(core.apply(root, { op: "addWire", from: "u", to: "c", row: 3, path: [[4, 3]] }), /either path or row/);
+  ok(core.apply(root, { op: "addBox", id: "below", col: 2, row: 12, cw: 2, ch: 1 }));
+  bad(core.apply(root, { op: "addWire", from: "u", to: "below", row: 3 }), /overlap in columns/);
+  assert.deepEqual(plain(core.rowCells(root.BOX.s, root.BOX.c, 4).cells), [[10, 4], [9, 4]]);
+});
+
+test("UML zones: frame / boundary / lane with operand dividers", () => {
+  const { core, root } = fresh();
+  ok(core.apply(root, { op: "addZone", col: 0, row: 12, cw: 6, ch: 6, label: "alt [ok]", kind: "frame", dividers: [[3, "[else]"]] }));
+  ok(core.apply(root, { op: "setZone", index: 3, kind: "lane", dividers: null }));
+  assert.equal(root.ZONES[3].dividers, undefined);
+  bad(core.apply(root, { op: "addZone", col: 0, row: 0, cw: 1, ch: 1, dividers: [[0, "x"]] }), /row, label/);
+  bad(core.apply(root, { op: "addZone", col: 0, row: 0, cw: 1, ch: 1, kind: "swim" }), /zone kind/);
+});
+
+test("the UML showcase builds from its command file and every expansion is overlap-free", () => {
+  const d = fresh(), root = d.core.normDiag({ GRID: { cols: 18, rows: 11, cell: 64, gap: 5 } });
+  const cmds = parseCommands(fs.readFileSync(path.join(ROOT_DIR, "examples", "uml-showcase.cmds.jsonl"), "utf8"));
+  for (const c of cmds) ok(d.core.apply(root, c));
+  assert.deepEqual(plain(d.core.query(root, { q: "layout", all: true }).overlaps), []);
+  assert.equal(new Set(Object.values(root.BOX).map(b => b.kind || "box")).size, d.core.BOX_KINDS.length - 1);   // every kind but plain "box"
+  assert.deepEqual(plain(d.core.unknownFields(root)), { box: [], wire: [] });
+});

@@ -1,0 +1,103 @@
+// UML showcase — every box kind, arrow kind and zone kind, built only through commands:
+//   node daigram.mjs new examples/uml-showcase.html --title "UML showcase"
+//   node daigram.mjs apply examples/uml-showcase.html examples/uml-showcase.cmds.jsonl
+//
+// ---- class diagram ----
+{"op":"addZone","col":0,"row":0,"cw":25,"ch":14,"label":"class diagram","kind":"frame"}
+{"op":"addBox","id":"shape","n":"Shape","kind":"class","abstract":true,"attrs":["# id: UUID","# origin: Point"],"ops":["+ area(): double","+ move(dx, dy)"],"col":2,"row":2,"cw":4,"ch":3}
+{"op":"addBox","id":"circle","n":"Circle","kind":"class","attrs":["- r: double"],"ops":["+ area(): double"],"col":1,"row":9,"cw":4,"ch":3}
+{"op":"addBox","id":"rect","n":"Rect","kind":"class","attrs":["- w, h: double"],"ops":["+ area(): double"],"col":7,"row":9,"cw":4,"ch":3}
+{"op":"addBox","id":"drawable","n":"Drawable","kind":"interface","ops":["+ draw(c: Canvas)"],"cls":"blue","col":9,"row":2,"cw":4,"ch":2}
+{"op":"addBox","id":"canvas","n":"Canvas","kind":"class","attrs":["- size: Point"],"ops":["+ paint()"],"col":15,"row":2,"cw":4,"ch":3}
+{"op":"addBox","id":"color","n":"Color","kind":"enum","attrs":["RED","GREEN","BLUE"],"cls":"violet","col":15,"row":8,"cw":3,"ch":3}
+{"op":"addBox","id":"point","n":"Point","kind":"datatype","attrs":["x, y: double"],"col":21,"row":2,"cw":3,"ch":2}
+{"op":"addBox","id":"c1","n":"c1 : Circle","kind":"object","attrs":["r = 2.0"],"cls":"yellow","col":20,"row":9,"cw":4,"ch":2}
+{"op":"addWire","from":"circle","to":"shape","kind":"generalization"}
+{"op":"addWire","from":"rect","to":"shape","kind":"generalization"}
+{"op":"addWire","from":"shape","to":"drawable","kind":"realization"}
+{"op":"addWire","from":"drawable","to":"canvas","kind":"usage"}
+{"op":"addWire","from":"canvas","to":"shape","kind":"aggregation","label":"shapes","fromLabel":"1","toLabel":"0..*"}
+{"op":"addWire","from":"shape","to":"color","kind":"directed","toLabel":"fill"}
+{"op":"addWire","from":"canvas","to":"point","kind":"composition","toLabel":"size"}
+{"op":"addWire","from":"c1","to":"circle","kind":"dependency","label":"«instanceOf»","style":"f3"}
+// ---- use cases ----
+{"op":"addZone","col":26,"row":0,"cw":19,"ch":11,"label":"use cases","kind":"frame"}
+{"op":"addBox","id":"operator","n":"Operator","kind":"actor","col":27,"row":3,"cw":2,"ch":2}
+{"op":"addBox","id":"admin","n":"Admin","kind":"actor","col":27,"row":7,"cw":2,"ch":2}
+{"op":"addZone","col":31,"row":1,"cw":13,"ch":9,"label":"Drone C2","kind":"boundary"}
+{"op":"addBox","id":"uctrack","n":"Track drone","kind":"usecase","cls":"blue","col":32,"row":3,"cw":4,"ch":2}
+{"op":"addBox","id":"ucclass","n":"Classify","kind":"usecase","cls":"blue","col":39,"row":3,"cw":4,"ch":2}
+{"op":"addBox","id":"ucmit","n":"Mitigate","kind":"usecase","cls":"red","col":32,"row":7,"cw":4,"ch":2}
+{"op":"addBox","id":"ucconf","n":"Configure","kind":"usecase","cls":"blue","col":39,"row":7,"cw":4,"ch":2}
+{"op":"addWire","from":"operator","to":"uctrack","kind":"association"}
+{"op":"addWire","from":"admin","to":"ucmit","kind":"association"}
+{"op":"addWire","from":"uctrack","to":"ucclass","kind":"include"}
+{"op":"addWire","from":"ucmit","to":"uctrack","kind":"extend"}
+{"op":"addWire","from":"ucconf","to":"ucmit","kind":"generalization","style":"blue"}
+// ---- state machine ----
+{"op":"addZone","col":0,"row":15,"cw":25,"ch":9,"label":"stm Sensor","kind":"frame"}
+{"op":"addBox","id":"st0","n":"start","kind":"initial","col":1,"row":18,"cw":1,"ch":1}
+{"op":"addBox","id":"idle","n":"Idle","kind":"state","attrs":["entry / reset()"],"col":3,"row":17,"cw":4,"ch":3}
+{"op":"addBox","id":"tracking","n":"Tracking","kind":"state","attrs":["do / follow()","exit / log()"],"cls":"blue","col":10,"row":17,"cw":4,"ch":3}
+{"op":"addBox","id":"lost","n":"lost?","kind":"choice","col":17,"row":18,"cw":1,"ch":1}
+{"op":"addBox","id":"stEnd","n":"end","kind":"final","col":22,"row":18,"cw":1,"ch":1}
+{"op":"addBox","id":"hist","n":"H*","kind":"history","col":11,"row":21,"cw":1,"ch":1}
+{"op":"addBox","id":"halt","n":"halt","kind":"terminate","col":22,"row":21,"cw":1,"ch":1}
+{"op":"addBox","id":"jn","n":"junction","kind":"junction","col":17,"row":21,"cw":1,"ch":1}
+{"op":"addWire","from":"st0","to":"idle","kind":"transition"}
+{"op":"addWire","from":"idle","to":"tracking","kind":"transition","label":"detect [conf > 0.8]"}
+{"op":"addWire","from":"tracking","to":"lost","kind":"transition","label":"timeout"}
+{"op":"addWire","from":"lost","to":"stEnd","kind":"transition","label":"[gone]"}
+{"op":"addWire","from":"lost","to":"jn","kind":"transition","label":"[seen]"}
+{"op":"addWire","from":"jn","to":"hist","kind":"transition"}
+{"op":"addWire","from":"jn","to":"halt","kind":"transition","label":"fault"}
+// ---- activity ----
+{"op":"addZone","col":26,"row":12,"cw":19,"ch":12,"label":"act Mitigation","kind":"frame"}
+{"op":"addZone","col":26,"row":13,"cw":19,"ch":5,"label":"C2","kind":"lane"}
+{"op":"addZone","col":26,"row":18,"cw":19,"ch":6,"label":"Effector","kind":"lane"}
+{"op":"addBox","id":"a0","n":"start","kind":"initial","col":27,"row":15,"cw":1,"ch":1}
+{"op":"addBox","id":"detect","n":"Detect","kind":"action","col":29,"row":14,"cw":3,"ch":2}
+{"op":"addBox","id":"fork","n":"fork","kind":"fork","col":33,"row":14,"cw":1,"ch":2}
+{"op":"addBox","id":"notify","n":"Notify","kind":"send","cls":"blue","col":35,"row":14,"cw":3,"ch":2}
+{"op":"addBox","id":"jam","n":"Jam","kind":"action","cls":"red","col":35,"row":19,"cw":3,"ch":2}
+{"op":"addBox","id":"ack","n":"Ack","kind":"accept","cls":"blue","col":39,"row":14,"cw":3,"ch":2}
+{"op":"addBox","id":"wait","n":"30 s","kind":"time","col":29,"row":20,"cw":1,"ch":1}
+{"op":"addBox","id":"join","n":"join","kind":"fork","col":39,"row":19,"cw":3,"ch":1}
+{"op":"addBox","id":"aEnd","n":"end","kind":"final","col":43,"row":19,"cw":1,"ch":1}
+{"op":"addBox","id":"aStop","n":"stop","kind":"flowfinal","col":43,"row":15,"cw":1,"ch":1}
+{"op":"addWire","from":"a0","to":"detect","kind":"transition"}
+{"op":"addWire","from":"detect","to":"fork","kind":"transition"}
+{"op":"addWire","from":"fork","to":"notify","kind":"transition"}
+{"op":"addWire","from":"fork","to":"jam","kind":"transition"}
+{"op":"addWire","from":"notify","to":"ack","kind":"transition"}
+{"op":"addWire","from":"ack","to":"aStop","kind":"transition"}
+{"op":"addWire","from":"jam","to":"join","kind":"transition"}
+{"op":"addWire","from":"wait","to":"jam","kind":"transition","label":"after 30 s"}
+{"op":"addWire","from":"join","to":"aEnd","kind":"transition"}
+// ---- components / deployment ----
+{"op":"addZone","col":0,"row":25,"cw":25,"ch":11,"label":"cmp / deployment","kind":"frame"}
+{"op":"addBox","id":"pkg","n":"c2.fusion","kind":"package","s":"tracks · fusion","col":1,"row":27,"cw":6,"ch":3}
+{"op":"addBox","id":"engine","n":"FusionEngine","kind":"component","cls":"blue","col":9,"row":27,"cw":4,"ch":2}
+{"op":"addBox","id":"port","n":"grpc","kind":"port","col":13,"row":27,"cw":1,"ch":1}
+{"op":"addBox","id":"itrack","n":"ITrack","kind":"provided","col":16,"row":27,"cw":1,"ch":1}
+{"op":"addBox","id":"isensor","n":"ISensor","kind":"required","col":9,"row":31,"cw":1,"ch":1}
+{"op":"addBox","id":"jar","n":"fusion.jar","kind":"artifact","col":12,"row":31,"cw":4,"ch":2}
+{"op":"addBox","id":"pod","n":"k8s pod","kind":"node","s":"fusion-engine","stereo":"device","col":18,"row":27,"cw":5,"ch":3}
+{"op":"addBox","id":"note1","n":"Tracks leave via gRPC;\nsee track-service.","kind":"note","cls":"yellow","col":1,"row":32,"cw":6,"ch":2}
+{"op":"addWire","from":"pkg","to":"engine","kind":"containment"}
+{"op":"addWire","from":"port","to":"itrack","kind":"association"}
+{"op":"addWire","from":"engine","to":"isensor","kind":"association"}
+{"op":"addWire","from":"jar","to":"engine","kind":"dependency","label":"«manifest»"}
+{"op":"addWire","from":"jar","to":"pod","kind":"dependency","label":"«deploy»"}
+{"op":"addWire","from":"note1","to":"pkg","kind":"anchor"}
+// ---- sequence ----
+{"op":"addZone","col":26,"row":25,"cw":19,"ch":11,"label":"sd Track","kind":"frame"}
+{"op":"addBox","id":"ui","n":"UI","kind":"lifeline","acts":[[2,7]],"col":27,"row":26,"cw":3,"ch":9}
+{"op":"addBox","id":"c2","n":"C2","kind":"lifeline","cls":"blue","acts":[[2,7]],"col":33,"row":26,"cw":3,"ch":9}
+{"op":"addBox","id":"sensor","n":"Sensor","kind":"lifeline","acts":[[3,5]],"col":40,"row":26,"cw":3,"ch":9}
+{"op":"addWire","from":"ui","to":"c2","kind":"sync","label":"track(id)","row":28}
+{"op":"addWire","from":"c2","to":"sensor","kind":"async","label":"subscribe","row":29}
+{"op":"addWire","from":"sensor","to":"c2","kind":"reply","label":"tracks","row":31}
+{"op":"addWire","from":"c2","to":"c2","kind":"sync","label":"fuse()","row":32}
+{"op":"addWire","from":"c2","to":"ui","kind":"reply","label":"track","row":34}
+{"op":"addZone","col":31,"row":28,"cw":13,"ch":5,"label":"loop [every 1 s]","kind":"frame","dividers":[[3,"[degraded]"]]}
