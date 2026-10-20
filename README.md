@@ -35,6 +35,9 @@ visual editor.
     come closer than a 1-cell routing channel (boxes that were touching stay touching), right or down —
     whichever is the shorter push. A **zone moves as one rigid group** and grows around its own members.
     Check any expansion with `{"q":"layout","all":true}` → `overlaps` (always empty).
+  - **Arrows go around an expanded box** unless one of their ends is that box or inside it (so arrows between
+    its children, and cross-subtree arrows like `http/tbm → config/prov`, still enter it). If there's no way
+    around, the arrow crosses it rather than turning red.
 - **Code listings** — a box with `code:"…"` (and `cls:"code"`) shows it as a monospace listing under its title.
   - **Cross-subtree wires** — a wire in any level's `W` may reference a *descendant* by slash-path
     (`{from:"p1/childA", to:"p2/childB"}`, declared at the common ancestor). It renders **only when

@@ -304,3 +304,42 @@ test("cross-level arrows: drawn only when both ends are displayed; drawn and del
   await p.eval(`daigram.dispatch({op:"setMode",edit:false}); daigram.dispatch({op:"collapseAll"}); localStorage.clear()`);
   await p.close();
 });
+
+test("arrows route AROUND an expanded box unless one of their ends is inside it (nested, cross-subtree, fallback)", opts, async () => {
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/t.html`);
+  await p.send("Emulation.setDeviceMetricsOverride", { width: 1800, height: 1300, deviceScaleFactor: 1, mobile: false });
+  await p.waitFor(`window.daigram`);
+  const mk = await p.eval(`(()=>{ localStorage.clear(); const empty={v:4,root:{grid:{cols:24,rows:16,cell:64,gap:5},boxes:{},wires:[],zones:[],desc:{},flows:[]}};
+    return daigram.batch([{op:"load",state:empty},
+      {op:"addBox",id:"L",n:"L",col:1,row:6,cw:3,ch:2},{op:"addBox",id:"R",n:"R",col:14,row:6,cw:3,ch:2},
+      {op:"addBox",id:"http",n:"http",col:7,row:5,cw:3,ch:2},{op:"addBox",parent:"http",id:"x",n:"x",col:1,row:1,cw:3,ch:2},
+      {op:"addBox",parent:"http",id:"tbm",n:"tbm",col:6,row:1,cw:3,ch:2},{op:"addBox",parent:"http/tbm",id:"q",n:"q",col:1,row:1,cw:3,ch:2},
+      {op:"addBox",id:"config",n:"config",col:7,row:11,cw:3,ch:2},{op:"addBox",parent:"config",id:"prov",n:"prov",col:1,row:1,cw:3,ch:2},
+      {op:"addWire",from:"L",to:"R",label:"outer"},{op:"addWire",from:"L",to:"http/x",label:"into-http"},
+      {op:"addWire",from:"http/tbm/q",to:"config/prov",label:"cross"},{op:"addWire",from:"http/x",to:"R",label:"out-of-http"},
+      {op:"addWire",from:"R",to:"http",label:"to-container"}]); })()`);
+  assert.equal(mk.ok, true, JSON.stringify(mk.results.filter(r => !r.ok)));
+  await p.eval(`EXPANDED=new Set(["http","http/tbm","config"]); render();`);
+  const res = await p.eval(`wireNodes.map(n=>{ const w=W[n.wi], own=new Set();
+    [w.from,w.to].forEach(f=>{const s=f.split("/");for(let i=1;i<=s.length;i++)own.add(s.slice(0,i).join("/"));});
+    const pts=n.path.getAttribute("d").slice(1).split(" L").map(t=>t.split(",").map(Number)).slice(1,-1);   // the cell centres it runs through
+    const inside=f=>{const R=boxRect(BOX[f]);return pts.some(([x,y])=>x>R.x&&x<R.x+R.w&&y>R.y&&y<R.y+R.h);};
+    const conts=Object.keys(BOX).filter(f=>BOX[f]._container);
+    return {label:w.label, warn:n.path.classList.contains("warn"), crossesForeign:conts.filter(f=>!own.has(f)&&inside(f)), enters:conts.filter(f=>own.has(f)&&inside(f)).sort()}; })`);
+  const by = Object.fromEntries(res.map(r => [r.label, r]));
+  for (const l of ["outer", "into-http", "cross", "out-of-http", "to-container"]) {
+    assert.ok(by[l], l + " drawn"); assert.equal(by[l].warn, false, l + " red");
+    assert.deepEqual(by[l].crossesForeign, [], l + " crosses a foreign expanded box");
+  }
+  assert.deepEqual(by.outer.enters, []);
+  assert.deepEqual(by.cross.enters, ["config", "http", "http/tbm"]);   // cross-subtree: enters both containers (and the nested one)
+  assert.ok(by["into-http"].enters.includes("http"));
+  // fallback: when every free cell lies inside a foreign expanded box, the wire crosses it instead of turning red
+  const fb = await p.eval(`(()=>{ GRID={cols:8,rows:5,cell:64,gap:5}; BOX={ c:{n:"c",col:0,row:0,cw:8,ch:5,_container:true,_depth:0},
+      a:{n:"a",col:1,row:1,cw:1,ch:1,_depth:1}, b:{n:"b",col:6,row:1,cw:1,ch:1,_depth:1} }; W=[{from:"a",to:"b"}];
+    routeAndDraw(); const strict=ENG.route("a","b",null,null,false,false); ENG=makeEngine();
+    return {strict:!!strict, drawn:wireNodes.length, red:document.querySelectorAll("path.wire.warn").length}; })()`);
+  assert.deepEqual(fb, { strict: false, drawn: 1, red: 0 });
+  assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
+  await p.eval(`localStorage.clear()`); await p.close();
+});

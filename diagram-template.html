@@ -968,24 +968,30 @@ function fillBox(el,b,R){ const k=kindOf(b);
 /* ============================ GRID ROUTER (tested) ============================ */
 function makeEngine(){
   const {cols,rows}=GRID, key=(c,r)=>r*cols+c, inb=(c,r)=>c>=0&&c<cols&&r>=0&&r<rows;
-  const boxCells=new Set();
-  // Container backdrops (expanded boxes) are transparent groupings that ENCLOSE their children —
-  // don't treat them as obstacles, or wires between those children have no path and fall back to
-  // the box-crossing last resort (rendered red-dashed). Only leaf boxes block routing.
-  for(const id in BOX){const b=BOX[id]; if(b._container)continue;
-    for(let c=b.col;c<b.col+b.cw;c++)for(let r=b.row;r<b.row+b.ch;r++)boxCells.add(key(c,r));}
+  const boxCells=new Set(), contAt=new Map();   // leaf-box cells; cell -> fids of the expanded boxes (containers) covering it
+  for(const id in BOX){const b=BOX[id];
+    for(let c=b.col;c<b.col+b.cw;c++)for(let r=b.row;r<b.row+b.ch;r++){ const k=key(c,r);
+      if(!b._container)boxCells.add(k); else { let l=contAt.get(k); if(!l)contAt.set(k,l=[]); l.push(id); } } }
   const isBox=(c,r)=>boxCells.has(key(c,r));
+  // Per-wire obstacles. Leaf boxes always block. An expanded box (container) blocks a wire unless one of the
+  // wire's ends IS that container or lies inside it (slash-path prefix: "http", "http/tbm" for container
+  // "http") — so wires between its own children, and cross-subtree wires entering it, still route inside,
+  // while every other wire goes AROUND it. A cell inside nested containers is blocked if ANY of them is
+  // foreign to the wire. open=true: the old rule (containers see-through for every wire) — the fallback.
+  function wallFor(fromId,toId,open){ if(open)return isBox;
+    const own=new Set(); for(const f of [fromId,toId]){ const p=String(f).split("/"); for(let i=1;i<=p.length;i++)own.add(p.slice(0,i).join("/")); }
+    return (c,r)=>{ const k=key(c,r); if(boxCells.has(k))return true; const cs=contAt.get(k); return !!cs&&cs.some(f=>!own.has(f)); }; }
   const hOcc=new Set(), vOcc=new Set();
   const freeH=(c,r)=>!hOcc.has(key(c,r)), freeV=(c,r)=>!vOcc.has(key(c,r));
   function autoSides(a,b){const dx=(b.col+b.cw/2)-(a.col+a.cw/2), dy=(b.row+b.ch/2)-(a.row+a.ch/2);
     if(Math.abs(dx)>=Math.abs(dy))return dx>=0?["r","l"]:["l","r"]; return dy>=0?["b","t"]:["t","b"];}
   const ALL_SIDES=["r","l","b","t"];
-  function sideCells(b,side){const out=[];
+  function sideCells(b,side,wall){const out=[];
     if(side==="r")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col+b.cw,r]);
     if(side==="l")for(let r=b.row;r<b.row+b.ch;r++)out.push([b.col-1,r]);
     if(side==="b")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row+b.ch]);
     if(side==="t")for(let c=b.col;c<b.col+b.cw;c++)out.push([c,b.row-1]);
-    return out.filter(([c,r])=>inb(c,r)&&!isBox(c,r));}
+    return out.filter(([c,r])=>inb(c,r)&&!wall(c,r));}
   // Center-bias: 0 at the middle of a side, rising toward CENTER_WEIGHT at either end — so the router
   // prefers to leave/enter dead-center of a side (away from the box's rounded corners) but still uses
   // a corner cell with no hard cliff when nothing else is reachable (e.g. a 1-cell-tall side).
@@ -1003,9 +1009,9 @@ function makeEngine(){
   // One A* search for a single fixed (fromSide,toSide) pair. Center-bias is seeded into each candidate
   // start cell's initial cost and added to the goal cell's final cost, so it competes on equal footing
   // with path length + the existing per-turn penalty instead of being a separate, disconnected pass.
-  function searchSide(A,B,fromSide,toSide,relax){
+  function searchSide(A,B,fromSide,toSide,relax,wall){
     const okH=(c,r)=>relax||freeH(c,r), okV=(c,r)=>relax||freeV(c,r);
-    const starts=sideCells(A,fromSide), goals=sideCells(B,toSide);
+    const starts=sideCells(A,fromSide,wall), goals=sideCells(B,toSide,wall);
     if(!starts.length||!goals.length)return null;
     const goalTax=new Map(goals.map(([c,r],i)=>[key(c,r),centerTax(goals.length,i)]));
     const gh=(c,r)=>Math.min.apply(null,goals.map(([gc,gr])=>Math.abs(gc-c)+Math.abs(gr-r)));
@@ -1022,7 +1028,7 @@ function makeEngine(){
       if(goalSet.has(key(cur.c,cur.r))){goal=cur;break;}
       const cg=g.get(cur.s);
       for(const[dc,dr,nd]of[[1,0,0],[-1,0,0],[0,1,1],[0,-1,1]]){
-        const nc=cur.c+dc,nr=cur.r+dr; if(!inb(nc,nr)||isBox(nc,nr))continue;
+        const nc=cur.c+dc,nr=cur.r+dr; if(!inb(nc,nr)||wall(nc,nr))continue;
         if(nd===0&&(!okH(cur.c,cur.r)||!okH(nc,nr)))continue;
         if(nd===1&&(!okV(cur.c,cur.r)||!okV(nc,nr)))continue;
         const ng=cg+1+(nd!==cur.d?TURN:0), ns=skey(nc,nr,nd);
@@ -1037,12 +1043,13 @@ function makeEngine(){
   // Try every (fromSide,toSide) combination (unless the caller pins one) and keep the cheapest —
   // path length + turn penalty + both ends' center-bias — so side selection and pathing are optimized
   // jointly instead of picking a side up front from box centers alone (the old autoSides-then-path split).
-  function route(fromId,toId,fromSide,toSide,relax){
+  function route(fromId,toId,fromSide,toSide,relax,open){
     const A=BOX[fromId],B=BOX[toId]; if(!A||!B)return null;
+    const wall=wallFor(fromId,toId,open);
     function searchCombos(fromSides,toSides){
       let found=null;
       for(const fs of fromSides)for(const ts of toSides){
-        const r=searchSide(A,B,fs,ts,relax);
+        const r=searchSide(A,B,fs,ts,relax,wall);
         if(r&&(!found||r.cost<found.cost))found=r;
       }
       return found;
@@ -1053,7 +1060,7 @@ function makeEngine(){
     commit(picked.cells,orient(picked.fromSide));
     return picked;
   }
-  return {route,commit,isBox,autoSides,inb};
+  return {route,commit,isBox,wallFor,autoSides,inb};
 }
 
 /* ---- routing + drawing all wires ---- */
@@ -1079,16 +1086,17 @@ function markers(){ let o="<defs>";
 function wirePoints(w){
   const A=BOX[w.from], B=BOX[w.to]; if(!A||!B)return null;
   let cells, fs, ts, warn=false;
-  const rc=w.row!==undefined&&rowFits(A,B,w.row);
+  const rc=w.row!==undefined&&rowFits(A,B,w.row,ENG.wallFor(w.from,w.to));
   if(rc){   // a horizontal arrow on a given row (sequence message / self-message)
     ENG.commit(rc.cells,"H");
     const pts=rc.cells.map(([c,r])=>[cx(c),cy(r)]);
     pts.unshift(endPt(A,rc.fs,[0,w.row])); pts.push(endPt(B,rc.ts,[0,rc.endRow]));
     return {pts,fs:rc.fs,ts:rc.ts,warn};
   }
-  if(w.path&&w.path.length&&pathFits(w.path,A,B)){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells,(fs==="l"||fs==="r")?"H":"V"); }
+  if(w.path&&w.path.length&&pathFits(w.path,A,B,ENG.wallFor(w.from,w.to))){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells,(fs==="l"||fs==="r")?"H":"V"); }
   else { let r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
     if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); } // relaxed: still routes AROUND boxes (may share a lane) — valid, NOT a warning
+    if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,false,true)||ENG.route(w.from,w.to,w.fromSide,w.toSide,true,true); }   // no way around a foreign expanded box: cross it (the old see-through rule) rather than draw red
     if(!r){ // last resort — only if no box-avoiding orthogonal path exists at all (target enclosed)
       const[afs,ats]=ENG.autoSides(A,B); fs=w.fromSide||afs; ts=w.toSide||ats; warn=true;
       const bp=endPt(A,fs,[A.col+ (fs==="r"?A.cw:0), A.row]); const bq=endPt(B,ts,[B.col,B.row]);
@@ -1103,13 +1111,13 @@ function wirePoints(w){
 }
 const endPt=(b,side,cell)=>shapeEdge(b,side,borderPt(b,side,cell));
 // A row arrow is drawn on its row only while both boxes still span it and the cells between are free.
-function rowFits(A,B,row){ const rc=DaigramCore.rowCells(A,B,row); if(!rc)return null;
+function rowFits(A,B,row,wall){ const rc=DaigramCore.rowCells(A,B,row); if(!rc)return null;
   if(row<A.row||row>=A.row+A.ch||rc.endRow<B.row||rc.endRow>=B.row+B.ch)return null;
-  return rc.cells.some(([c,r])=>ENG.isBox(c,r))?null:rc; }
-// An explicit path is used only while it still connects A to B without entering a leaf box
+  return rc.cells.some(([c,r])=>wall(c,r))?null:rc; }
+// An explicit path is used only while it still connects A to B without entering a box that blocks this wire
 // (an expand reflow can move one end away); otherwise the wire is auto-routed instead.
-function pathFits(path,A,B){ const T=DaigramCore.touches, s=path[0], e=path[path.length-1];
-  return T(A,s[0],s[1])&&T(B,e[0],e[1])&&!path.some(([c,r])=>ENG.isBox(c,r)); }
+function pathFits(path,A,B,wall){ const T=DaigramCore.touches, s=path[0], e=path[path.length-1];
+  return T(A,s[0],s[1])&&T(B,e[0],e[1])&&!path.some(([c,r])=>wall(c,r)); }
 function routeAndDraw(){
   ENG=makeEngine();
   wiresEl.innerHTML=markers();
