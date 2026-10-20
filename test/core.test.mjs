@@ -163,3 +163,31 @@ test("parseCommands accepts JSONL with comments, a JSON array, or one object", (
   assert.equal(parseCommands('[{"op":"a"},{"op":"b"}]').length, 2);
   assert.throws(() => parseCommands('{"op":"a"}\n{oops}'), /line 2/);
 });
+
+test("a page's own .box.<cls> styles become valid classes", () => {
+  const tpl = fs.readFileSync(TEMPLATE, "utf8");
+  const plainTpl = loadDiagramHtml(tpl);
+  bad(plainTpl.core.apply(plainTpl.root, { op: "setBox", id: "a", cls: "aws" }), /box classes from/);
+  const d = loadDiagramHtml(tpl.replace("</style>", ".box.aws{background:#1c1533}.box.aws .n{color:#fff}\n</style>"));
+  ok(d.core.apply(d.root, { op: "setBox", id: "a", cls: "aws multi" }));
+  bad(d.core.apply(d.root, { op: "setBox", id: "a", cls: "container" }), /box classes from/);   // engine state classes stay out
+});
+
+test("upgrade swaps the engine but keeps CONFIG, title, header, BUILD and the page's own CSS", async () => {
+  const { upgradeHtml } = await import("../daigram.mjs");
+  const tpl = fs.readFileSync(TEMPLATE, "utf8");
+  const d = fresh(); ok(d.core.apply(d.root, { op: "addBox", n: "Old one", col: 1, row: 12, cw: 2, ch: 1 }));
+  const old = d.core.spliceConfig(tpl, d.root)
+    .replace(/<title>[^<]*<\/title>/, "<title>My C2 view</title>")
+    .replace(/<h1>[^<]*<\/h1>/, "<h1>My header</h1>")
+    .replace(/let BUILD="[^"]*"/, 'let BUILD="b42"')
+    .replace("</style>", "  .box.wip{border-style:dashed}\n</style>")
+    .replace("function pathFits(", "function OLD_ENGINE_MARK(){}\nfunction pathFits(");   // stand-in for an older engine
+  const { html, kept } = upgradeHtml(old, tpl);
+  assert.ok(!html.includes("OLD_ENGINE_MARK"));
+  assert.match(html, /<title>My C2 view<\/title>/); assert.match(html, /<h1>My header<\/h1>/); assert.match(html, /let BUILD="b42"/);
+  assert.deepEqual(kept.css, [".box.wip{border-style:dashed}"]);
+  const a = loadDiagramHtml(old), b = loadDiagramHtml(html);
+  assert.equal(b.core.hash(b.root), a.core.hash(a.root));
+  assert.equal(upgradeHtml(html, tpl).html, html);   // idempotent
+});

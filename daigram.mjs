@@ -10,6 +10,7 @@
 //   daigram new <out.html> [--title T]                            a fresh, empty diagram from the template
 //   daigram apply <diagram.html> <cmds.jsonl|-> [-o out.html] [--keep-going] [--rec-dir D | --no-rec]
 //   daigram query <diagram.html> '<json query>'
+//   daigram upgrade <diagram.html>... [--template T] [--dry-run]  swap in this engine; keep CONFIG, title, header, own CSS
 //   daigram replay <recording.jsonl> [--session ID]               headless replay; checks every model hash
 //   daigram send '<json>'|- [--page /x.html] [--port 4173]        drive the page open in the browser (live)
 import http from "node:http";
@@ -35,11 +36,33 @@ export function loadDiagramHtml(html) {
   if (!m) throw new Error("no CONFIG block found — is this a daigram page?");
   const ctx = vm.createContext({});
   const core = vm.runInContext(coreSrc + "\n;DaigramCore", ctx, { timeout: 2000 });
+  core.addBoxClasses(core.boxClassesInCss(styleOf(html)));   // the page's own .box.<cls> styles are valid classes
   const pick = ["GRID", "BOX", "W", "ZONES", "DESC", "FLOWS"].map(k => `${k}:typeof ${k}==="undefined"?undefined:${k}`).join(",");
   const cfg = vm.runInContext(m[1] + `\n;({${pick}})`, ctx, { timeout: 2000 });
   return { core, html, root: core.normDiag({ GRID: cfg.GRID, BOX: cfg.BOX, W: cfg.W, ZONES: cfg.ZONES, DESC: cfg.DESC, FLOWS: cfg.FLOWS }) };
 }
 export const loadDiagram = file => loadDiagramHtml(fs.readFileSync(file, "utf8"));
+const styleOf = html => { const a = html.indexOf("<style>"), b = html.indexOf("</style>"); return a >= 0 && b > a ? html.slice(a + 7, b) : ""; };
+
+/* Upgrade a diagram to the engine of `templateHtml`: keep its CONFIG (verbatim), <title>, header text,
+   BUILD stamp and its own CSS lines (lines in its <style> the template doesn't have, e.g. custom
+   .box.<cls> colours); take everything else — the engine — from the template. Returns {html, kept}. */
+export function upgradeHtml(oldHtml, templateHtml) {
+  const cfg = oldHtml.match(CONFIG_RE), legacy = !cfg && oldHtml.match(LEGACY_CONFIG_RE);
+  if (!cfg && !legacy) throw new Error("no CONFIG block found — is this a daigram page?");
+  let html = templateHtml.replace(CONFIG_RE, m => m.replace(/(\*\/\n)[\s\S]*?(\n\/\* =+ \*\/)$/, (x, a, b) => a + (cfg ? cfg[1] : legacy[1]) + b));
+  const kept = { title: false, header: false, build: false, css: 0 };
+  const title = oldHtml.match(/<title>[^<]*<\/title>/);
+  if (title) { html = html.replace(/<title>[^<]*<\/title>/, () => title[0]); kept.title = true; }
+  const head = re => (oldHtml.match(re) || [])[0], hi = head(/<div class="headinfo">[\s\S]*?<\/div>/);
+  if (hi) { html = html.replace(/<div class="headinfo">[\s\S]*?<\/div>/, () => hi); kept.header = true; }
+  const build = head(/let BUILD="[^"]*"/);
+  if (build) { html = html.replace(/let BUILD="[^"]*"/, () => build); kept.build = true; }
+  const tplCss = new Set(styleOf(templateHtml).split("\n").map(l => l.trim()));
+  const extra = styleOf(oldHtml).split("\n").filter(l => l.trim() && !tplCss.has(l.trim()));
+  if (extra.length) { html = html.replace("</style>", () => extra.join("\n") + "\n</style>"); kept.css = extra.map(l => l.trim()); }
+  return { html, kept };
+}
 export const loadCore = () => loadDiagramHtml(fs.readFileSync(TEMPLATE, "utf8")).core;
 
 // A page whose CONFIG is `root`. A fresh BUILD stamp makes browsers drop a stale saved layout of the old version.
@@ -208,7 +231,7 @@ function args(argv) {
   const pos = [], opt = {};
   for (let i = 0; i < argv.length; i++) { const a = argv[i];
     if (a === "-o") opt.o = argv[++i];
-    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
+    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json", "dry-run"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
     else pos.push(a); }
   return { pos, opt };
 }
@@ -273,6 +296,21 @@ async function main(argv) {
       console.log(JSON.stringify({ ok: !failed, wrote: target, failed, hash: d.core.hash(root), recording: rf }));
       return process.exit(failed ? 1 : 0);
     }
+    case "upgrade": {
+      if (!pos.length) die("usage: daigram upgrade <diagram.html>... [--template T] [--dry-run]   (in place; keeps CONFIG, title, header, own CSS)");
+      const tpl = fs.readFileSync(opt.template || TEMPLATE, "utf8"); let bad = 0;
+      for (const f of pos) {
+        try {
+          const old = fs.readFileSync(f, "utf8"), { html, kept } = upgradeHtml(old, tpl);
+          const a = loadDiagramHtml(old), b = loadDiagramHtml(html), same = a.core.hash(a.root) === b.core.hash(b.root);
+          if (!same) { bad++; console.log(JSON.stringify({ file: f, ok: false, error: "model changed during upgrade — not written" })); continue; }
+          const changed = html !== old;
+          if (changed && !opt["dry-run"]) fs.writeFileSync(f, html);
+          console.log(JSON.stringify({ file: f, ok: true, changed, written: changed && !opt["dry-run"], hash: b.core.hash(b.root), kept }));
+        } catch (e) { bad++; console.log(JSON.stringify({ file: f, ok: false, error: e.message })); }
+      }
+      return process.exit(bad ? 1 : 0);
+    }
     case "query": {
       if (pos.length < 2) die("usage: daigram query <diagram.html> '<json>'");
       const d = loadDiagram(pos[0]), r = d.core.query(d.root, JSON.parse(readInput(pos[1])));
@@ -293,7 +331,7 @@ async function main(argv) {
       console.log(JSON.stringify(r, null, 1)); return process.exit(r.ok ? 0 : 1);
     }
     default:
-      console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 15).map(l => l.replace(/^\/\/ ?/, "")).join("\n"));
+      console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 16).map(l => l.replace(/^\/\/ ?/, "")).join("\n"));
       return process.exit(cmd ? 2 : 0);
   }
 }

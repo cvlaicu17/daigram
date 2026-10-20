@@ -253,8 +253,7 @@ const TYPES={
   pos:[v=>Number.isInteger(v)&&v>=1,"an integer >= 1 (grid cells)"],
   num:[v=>typeof v==="number"&&isFinite(v),"a number"],
   bool:[v=>typeof v==="boolean","true or false"],
-  cls:[v=>typeof v==="string"&&v.split(/\s+/).filter(Boolean).every(t=>BOX_CLS.includes(t)),
-       'space-separated box classes from: '+BOX_CLS.join(" ")+' ("" = green)'],
+  cls:[v=>typeof v==="string"&&v.split(/\s+/).filter(Boolean).every(t=>BOX_CLS.includes(t)),""],   // description: see clsDoc()
   style:[v=>v===""||WIRE_STYLES.includes(v),'a wire style: "" '+WIRE_STYLES.join(" ")],
   side:[v=>v===null||SIDES.includes(v),"a box side r|l|t|b, or null for auto"],
   kind:[v=>v===""||ZONE_KINDS.includes(v),'a zone kind: "" '+ZONE_KINDS.join(" ")],
@@ -265,6 +264,15 @@ const TYPES={
   fids:[v=>Array.isArray(v)&&v.every(isFid),"a list of box paths"],
   state:[v=>!!v&&typeof v==="object"&&!Array.isArray(v),"a saved state object ({v:4,root,expanded})"],
 };
+
+const clsDoc=()=>{TYPES.cls[1]='space-separated box classes from: '+BOX_CLS.join(" ")+' ("" = green)';};
+clsDoc();
+// A page may style extra box classes in its own CSS (`.box.aws{…}`); those become valid `cls` values too.
+// The page registers them from its stylesheet at boot, the CLI from the file's <style>.
+const STATE_CLS=["container","hassub","droptarget","active","adj","pinned","sel","dim"];
+function boxClassesInCss(css){ const out=[], re=/\.box\.([A-Za-z][\w-]*)\s*\{/g; let m;
+  while((m=re.exec(css)))if(!STATE_CLS.includes(m[1])&&!out.includes(m[1]))out.push(m[1]); return out; }
+function addBoxClasses(names){ for(const n of names)if(/^[A-Za-z][\w-]*$/.test(n)&&!STATE_CLS.includes(n)&&!BOX_CLS.includes(n))BOX_CLS.push(n); clsDoc(); return BOX_CLS.slice(); }
 
 /* ---- the command catalog. view:true = handled by the live page only (not the headless model);
         effect:true = has an outside side effect (download, reload…) and is skipped on replay. ---- */
@@ -523,7 +531,7 @@ function query(root,q){ const err=validate(QUERIES,q,"q"); if(err)return {ok:fal
   try{ return Object.assign({ok:true},QOPS[q.q](root,q)); }
   catch(e){ if(e&&e.cmdError)return {ok:false,error:q.q+": "+e.message}; throw e; } }
 
-return {VERSION,COMMANDS,QUERIES,TYPES,validate,catalog,apply,query,hash,normDiag,boxByFid,parentOf,allSubFids,
+return {VERSION,COMMANDS,QUERIES,TYPES,validate,catalog,apply,query,hash,boxClassesInCss,addBoxClasses,normDiag,boxByFid,parentOf,allSubFids,
         serializeDiagram,buildDiagram,stateRoot,configText,spliceConfig,touches};
 })();
 </script>
@@ -1564,6 +1572,9 @@ function rebuildFlowButtons(){ toolbarEl.querySelectorAll(".flowbtn").forEach(b=
     toolbarEl.insertBefore(b,btnExpandAll); }); }
 
 /* ---- boot ---- */
+{ const sel=document.getElementById("ef-cls"), have=new Set([...sel.options].map(o=>o.value));   // this page's own .box.<cls> styles are valid classes too
+  DaigramCore.addBoxClasses(DaigramCore.boxClassesInCss([...document.querySelectorAll("style")].map(s=>s.textContent).join("\n")))
+    .forEach(c=>{ if(!have.has(c)&&c!=="multi"){ const o=document.createElement("option"); o.value=c; o.textContent=c; sel.appendChild(o); } }); }
 render(); rebuildFlowButtons();
 recPush({k:"session",session:REC_SESSION,v:DaigramCore.VERSION,build:BUILD,title:document.title,page:REC_PAGE,ua:navigator.userAgent,state:captureState()});
 recDetectSink(); updateRecBtn();
