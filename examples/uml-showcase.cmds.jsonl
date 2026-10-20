@@ -1,6 +1,7 @@
 // UML showcase — every box kind, arrow kind and zone kind, built only through commands:
-//   node daigram.mjs new examples/uml-showcase.html --title "UML showcase"
-//   node daigram.mjs apply examples/uml-showcase.html examples/uml-showcase.cmds.jsonl
+//   node daigram.mjs new examples/uml-showcase.daigram.json --title "UML showcase"
+//   node daigram.mjs apply examples/uml-showcase.daigram.json examples/uml-showcase.cmds.jsonl
+//   node daigram.mjs build examples/uml-showcase.daigram.json       # → examples/uml-showcase.html (one file to share)
 //
 // ---- class diagram ----
 {"op":"addZone","col":0,"row":0,"cw":25,"ch":14,"label":"class diagram","kind":"frame"}

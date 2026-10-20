@@ -210,3 +210,25 @@ test("the UML showcase renders every shape, marker and zone kind", opts, async (
   assert.equal(p.logs.filter(l => /EXCEPTION/.test(l)).length, 0, p.logs.join("\n"));
   await p.close();
 });
+
+test("editing a .daigram.json live: Save writes the file; a change on disk reloads the page", opts, async () => {
+  const { sourceText, readSource } = await import("../daigram.mjs");
+  const f = path.join(dir, "live.daigram.json"), core = (await import("../daigram.mjs")).loadCore();
+  fs.writeFileSync(f, sourceText({ daigram: 1, title: "Live", root: core.serializeDiagram(core.normDiag({ GRID: { cols: 18, rows: 11, cell: 64, gap: 5 } })) }));
+  const p = await openPage(chrome, `http://127.0.0.1:${srv.port}/live.daigram.json?view`);
+  await p.waitFor(`window.daigram && daigram.query({q:"view"}).recording.sink==="server"`);
+  assert.equal(await p.eval(`SOURCE`), "/live.daigram.json");
+  assert.equal((await p.eval(`daigram.dispatch({op:"addBox",id:"x",n:"From page",col:1,row:1,cw:3,ch:2})`)).ok, true);
+  assert.equal(await p.eval(`document.getElementById("btnSave").textContent`), "Save •");          // unsaved
+  assert.equal((await p.eval(`daigram.dispatch({op:"save"})`)).writing, "/live.daigram.json");
+  await p.waitFor(`document.getElementById("btnSave").textContent.startsWith("Saved")`);
+  assert.equal(readSource(fs.readFileSync(f, "utf8")).root.boxes.x.n, "From page");
+  // an agent changes the file on disk → the (clean) page reloads with it
+  const src = readSource(fs.readFileSync(f, "utf8")); src.root.boxes.y = { n: "From disk", s: "", cls: "", col: 6, row: 1, cw: 3, ch: 2 };
+  fs.writeFileSync(f, sourceText(src));
+  await p.waitFor(`!!document.getElementById("box-y")`, 6000);
+  assert.equal(await p.eval(`!!document.getElementById("box-x")`), true);
+  // the downloadable single file is self-contained and not tied to the source
+  assert.match(await p.eval(`buildSaveHtml()`), /let SOURCE=null;/);
+  await p.close();
+});

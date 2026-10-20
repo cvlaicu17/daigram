@@ -1,0 +1,81 @@
+{
+  "daigram": 1,
+  "title": "Web service — example diagram",
+  "intro": "A generic web-service architecture drawn with the grid engine — client → edge/API → services → data. <span class=\"note\">Hover a block; click to pin; use the <b style=\"color:#5eead4\">Flow</b> buttons or toggle <b style=\"color:#f6c08a\">✎ Edit</b> to draw.</span>",
+  "root": {
+    "grid": {"cols":28,"rows":13,"cell":54,"gap":5},
+    "boxes": {
+      "client": {"n":"Client","s":"browser / app","cls":"","col":1,"row":1,"cw":4,"ch":2},
+      "cdn": {"n":"CDN / Edge","s":"static assets","cls":"","col":1,"row":5,"cw":4,"ch":2},
+      "gw": {"n":"API Gateway","s":"routing · rate-limit","cls":"blue","col":8,"row":1,"cw":4,"ch":2},
+      "auth": {"n":"Auth Service","s":"tokens / sessions","cls":"blue","col":8,"row":5,"cw":4,"ch":2},
+      "app": {"n":"App Service","s":"business logic","cls":"blue","col":15,"row":1,"cw":4,"ch":2},
+      "worker": {"n":"Worker","s":"background jobs","cls":"blue","col":15,"row":5,"cw":4,"ch":2},
+      "queue": {"n":"Queue","s":"message broker","cls":"db","col":15,"row":9,"cw":4,"ch":2},
+      "db": {"n":"Database","s":"primary store","cls":"db","col":22,"row":1,"cw":4,"ch":2},
+      "cache": {"n":"Cache","s":"in-memory","cls":"db","col":22,"row":5,"cw":4,"ch":2}
+    },
+    "wires": [
+      {"from":"client","to":"gw","label":"request","style":"f1"},
+      {"from":"client","to":"cdn","label":"assets","style":"f2"},
+      {"from":"cdn","to":"gw","label":"miss","style":"f2"},
+      {"from":"gw","to":"auth","label":"verify","style":"blue"},
+      {"from":"gw","to":"app","label":"route","style":"f1"},
+      {"from":"app","to":"db","label":"query","style":"blue"},
+      {"from":"app","to":"cache","label":"read/write","style":"f2"},
+      {"from":"app","to":"queue","label":"enqueue","style":"f3"},
+      {"from":"queue","to":"worker","label":"consume","style":"f3"},
+      {"from":"worker","to":"db","label":"persist","style":"blue"}
+    ],
+    "zones": [
+      {"col":0,"row":0,"cw":6,"ch":8,"label":"Client tier","kind":"eks"},
+      {"col":7,"row":0,"cw":6,"ch":8,"label":"Edge / API","kind":"eks"},
+      {"col":14,"row":0,"cw":6,"ch":12,"label":"Services","kind":"edge"},
+      {"col":21,"row":0,"cw":6,"ch":8,"label":"Data","kind":""}
+    ],
+    "desc": {
+      "client": {
+        "cat": "Client",
+        "d": "A browser or mobile app; the origin of every request.",
+        "eg": "Talks to the API Gateway (and the CDN for static assets)."
+      },
+      "cdn": {
+        "cat": "Edge",
+        "d": "Serves cached static assets close to the user; falls back to origin on a miss.",
+        "eg": "e.g. images, JS/CSS bundles."
+      },
+      "gw": {
+        "cat": "Edge / API",
+        "d": "Front door: routing, rate-limiting, TLS termination. Authenticates via the Auth service, then routes to app services.",
+        "pts": ["Rate-limit + auth","Fan out to services"]
+      },
+      "auth": {
+        "cat": "Service",
+        "d": "Issues and verifies tokens / sessions for the gateway.",
+        "eg": "e.g. JWT or opaque session tokens."
+      },
+      "app": {
+        "cat": "Service",
+        "d": "Core business logic. Reads/writes the database and cache, and enqueues background work.",
+        "pts": ["Query the database","Read-through the cache","Enqueue async jobs"]
+      },
+      "worker": {
+        "cat": "Service",
+        "d": "Consumes queued messages and does background work (emails, exports, etc.), persisting results.",
+        "eg": "Scales independently of the request path."
+      },
+      "queue": {"cat":"Service · broker","d":"Decouples the request path from slow work.","eg":"e.g. a message broker topic."},
+      "db": {"cat":"Data","d":"The primary system of record.","eg":"Written by both the app and the workers."},
+      "cache": {
+        "cat": "Data",
+        "d": "In-memory cache for hot reads and short-lived state.",
+        "eg": "Read-through / write-through from the app."
+      }
+    },
+    "flows": [
+      {"label":"Request path","nodes":["client","gw","app","db"]},
+      {"label":"Static assets","nodes":["client","cdn","gw"]},
+      {"label":"Async work","nodes":["app","queue","worker","db"]}
+    ]
+  }
+}

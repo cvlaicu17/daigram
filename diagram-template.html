@@ -735,6 +735,7 @@ return {VERSION,unknownFields,BOX_PROPS,WIRE_PROPS,COMMANDS,QUERIES,TYPES,valida
 "use strict";
 const SVGNS="http://www.w3.org/2000/svg";
 let BUILD="dev";   // build_pipeline.py stamps a unique value per deploy, so a redeploy ignores stale saved layouts
+let SOURCE=null;   // set by `daigram.mjs serve` when this page edits a .daigram.json — Save then writes the diagram back to that file
 const HTML_SRC="<!DOCTYPE html>\n"+document.documentElement.outerHTML;   // pristine page source (captured before any dynamic DOM) — used by "Save to file"
 
 /* ============================ CONFIG (edit this) ============================ */
@@ -1554,10 +1555,14 @@ function commit(){                                   // record a new committed s
   history.push(s);
   if(history.length>80)history.shift();
   hidx=history.length-1;
-  autosave();updateHistBtns();
+  autosave();updateHistBtns();setDirty(true);
 }
-function undo(){if(hidx<=0)return false;hidx--;applyState(history[hidx]);autosave();updateHistBtns();return true;}
-function redo(){if(hidx>=history.length-1)return false;hidx++;applyState(history[hidx]);autosave();updateHistBtns();return true;}
+function undo(){if(hidx<=0)return false;hidx--;applyState(history[hidx]);autosave();updateHistBtns();setDirty(true);return true;}
+function redo(){if(hidx>=history.length-1)return false;hidx++;applyState(history[hidx]);autosave();updateHistBtns();setDirty(true);return true;}
+// Unsaved changes vs the source file (only meaningful when editing a .daigram.json through the server).
+let DIRTY=false;
+function setDirty(on){ DIRTY=on; const b=document.getElementById("btnSave"); if(b&&SOURCE)b.textContent=on?"Save •":"Save"; }
+window.addEventListener("beforeunload",e=>{ if(SOURCE&&DIRTY){ e.preventDefault(); e.returnValue=""; } });
 function updateHistBtns(){const u=document.getElementById("btnUndo"),r=document.getElementById("btnRedo");
   if(u)u.disabled=hidx<=0; if(r)r.disabled=hidx>=history.length-1;}
 document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
@@ -1599,7 +1604,7 @@ const fileStem=()=>document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()||"di
    the file shows the layout with NO localStorage. Chrome/Edge use the File System Access API (one
    file-picker grant, then one-click re-saves to the same file); other browsers fall back to a download. */
 let _saveHandle=null;
-const buildSaveHtml=()=>DaigramCore.spliceConfig(HTML_SRC,ROOT);   // splice the fresh CONFIG into the pristine source (markers kept)
+const buildSaveHtml=()=>DaigramCore.spliceConfig(HTML_SRC,ROOT).replace(/let SOURCE="[^"\n]*";/,"let SOURCE=null;");   // splice the fresh CONFIG into the pristine source (markers kept)
 async function saveToFile(btn){
   const html=buildSaveHtml(), fname=fileStem()+".html";
   if(window.showSaveFilePicker){
@@ -1640,7 +1645,17 @@ const VIEW={
   details(c){ setDetailsOpen(c.open); },
   undo(){ return {ok:true,changed:undo()}; },
   redo(){ return {ok:true,changed:redo()}; },
-  save(c,o){ try{ const s=captureState(); s.__build=BUILD; localStorage.setItem(LSKEY,JSON.stringify(s)); flash(o.btn,"Saved ✓"); }
+  save(c,o){
+    if(SOURCE){   // editing a .daigram.json: write it back through the server (async; the button shows the outcome)
+      if(REC_SINK!=="server")return vfail("save: this page edits "+SOURCE+" but the daigram server is not reachable");
+      const state=captureState();
+      fetch("/api/source",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({path:SOURCE,state})})
+        .then(r=>r.json()).then(j=>{ if(!j.ok)throw new Error(j.error);
+          BUILD=j.build; autosave(); setDirty(false); flash(o.btn||document.getElementById("btnSave"),"Saved ✓"); rec("sourceSaved",{path:SOURCE,build:j.build}); })
+        .catch(err=>{ flash(o.btn||document.getElementById("btnSave"),"⚠ not saved"); rec("sourceSaveFailed",{path:SOURCE,error:String(err&&err.message||err)}); });
+      return {ok:true,writing:SOURCE};
+    }
+    try{ const s=captureState(); s.__build=BUILD; localStorage.setItem(LSKEY,JSON.stringify(s)); flash(o.btn,"Saved ✓"); }
     catch(err){ flash(o.btn,"⚠ use Export"); return vfail("save: browser storage is full or blocked — use Export"); } },
   import(c){ const r=DaigramCore.apply(ROOT,{op:"load",state:c.state}); if(!r.ok)return r;
     ROOT=r.root; EXPANDED=validExpanded(c.state.expanded); if(!EXPANDED.size)DaigramCore.apply(ROOT,{op:"normalize"});
@@ -1783,6 +1798,10 @@ async function replay(input,opts){ opts=opts||{};
 function liveConnect(){ if(typeof EventSource==="undefined")return;
   const es=new EventSource("/api/live?page="+encodeURIComponent(REC_PAGE)+"&session="+encodeURIComponent(REC_SESSION));
   es.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(_){return;}
+    if(m.sourceChanged){   // the .daigram.json was changed on disk (e.g. an agent ran `daigram.mjs apply`)
+      rec("sourceChanged",{path:SOURCE,dirty:DIRTY});
+      if(!DIRTY){ location.reload(); return; }
+      const b=document.getElementById("btnSave"); b.textContent="Save • ⚠"; b.title="The file changed on disk and you have unsaved edits: Save overwrites it, Reset loads the file"; return; }
     Promise.resolve().then(()=>m.query?daigramQuery(m.query):m.replay?replay(m.replay,m.opts):Array.isArray(m.cmds)?batch(m.cmds,"agent"):dispatch(m.cmd,{src:"agent"}))
       .catch(err=>vfail(String(err&&err.message||err)))
       .then(res=>fetch("/api/live/result",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:m.id,res})})); }; }
@@ -1837,6 +1856,7 @@ function rebuildFlowButtons(){ toolbarEl.querySelectorAll(".flowbtn").forEach(b=
     toolbarEl.insertBefore(b,btnExpandAll); }); }
 
 /* ---- boot ---- */
+if(SOURCE){ const b=document.getElementById("btnSave"); b.title="Write the diagram back to "+SOURCE; }
 { const opt=(sel,v)=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); };
   DaigramCore.BOX_KINDS.forEach(k=>opt(document.getElementById("ef-kind"),k));
   Object.keys(DaigramCore.WIRE_KINDS).forEach(k=>opt(document.getElementById("arrowKind"),k)); }

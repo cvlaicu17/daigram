@@ -40,13 +40,29 @@ visual editor.
 - **Persistence** — autosaves to `localStorage`, plus Export/Import JSON. A build stamp
   means a newer copy of the file ignores stale saved layouts.
 
+## Where a diagram lives: a source file + a built page
+```
+system.daigram.json   the diagram (boxes, arrows, zones, title, header text, own CSS) — edit this, keep it in git
+      │  node daigram.mjs build system.daigram.json
+      ▼
+system.html           generated: the current engine with the data baked in — ONE self-contained file to send / host
+```
+- The source is pretty-printed with **one box / arrow / zone per line**, so moving a box is a one-line git diff.
+- **Edit live:** `node daigram.mjs serve`, then open `http://127.0.0.1:4173/system.daigram.json?view` (the folder
+  listing links it). The page runs the current engine on the file's data; **Save** writes back to the `.json`
+  (`Save •` = unsaved changes). If the file changes on disk (an agent ran `apply`), the page reloads by itself.
+- **Engine updates** reach every diagram on the next `build` — no per-file upgrades.
+- Existing `.html` diagrams keep working; `node daigram.mjs extract old.html` turns one into `old.daigram.json`.
+
 ## Quick start
 ```bash
-cp diagram-template.html my-diagram.html
-# edit the CONFIG block at the top of the <script>, then open my-diagram.html
+node daigram.mjs new my-system.daigram.json --title "My system"
+node daigram.mjs serve                     # open http://127.0.0.1:4173/my-system.daigram.json?view, draw, Save
+node daigram.mjs build my-system.daigram.json   # → my-system.html, ready to send
 ```
 
-Everything is driven by a few literals in the `CONFIG (edit this)` block:
+Inside a page the model is a few literals in the `CONFIG (edit this)` block (the source's `root` holds the same
+data); hand-editing a built page still works:
 
 ```js
 let GRID = { cols:18, rows:11, cell:64, gap:5 };          // canvas = cols*cell × rows*cell
@@ -124,14 +140,15 @@ node daigram.mjs serve            # serves this folder on http://127.0.0.1:4173/
 
 ## Agents: drive a diagram without touching HTML
 ```bash
-node daigram.mjs new my-diagram.html --title "My system"          # empty diagram from the template
-node daigram.mjs apply my-diagram.html cmds.jsonl                  # headless; all-or-nothing, recorded
-node daigram.mjs query my-diagram.html '{"q":"level","parent":""}'
+node daigram.mjs new my-system.daigram.json --title "My system"     # empty diagram (source file)
+node daigram.mjs apply my-system.daigram.json cmds.jsonl            # headless; all-or-nothing, recorded
+node daigram.mjs query my-system.daigram.json '{"q":"level","parent":""}'
+node daigram.mjs build my-system.daigram.json                       # → my-system.html
 node daigram.mjs send '{"op":"addBox","n":"X","col":1,"row":1,"cw":3,"ch":2}'   # live: the page open via `serve`
 node daigram.mjs send '{"q":"view"}'                               # live: what is shown, red (unroutable) arrows
 ```
 `apply` reads JSONL (or a JSON array), prints one result per command, and writes the file only if every
-command succeeded (`--keep-going` to write anyway).
+command succeeded (`--keep-going` to write anyway). `apply` / `query` take a `.daigram.json` or an `.html`.
 
 ## Tests
 ```bash
@@ -141,10 +158,10 @@ npm test     # core unit tests + real-browser tests (headless Chrome via CDP; sk
 ## What's here
 | file | what |
 |------|------|
-| `diagram-template.html` | the engine — **copy this to start a new diagram** |
-| `daigram.mjs` | local server (recording to disk, live agent link) + agent CLI (`apply`, `query`, `send`, `replay`, `new`, `commands`) |
+| `diagram-template.html` | the engine (what `build` bakes your data into; can also be copied and hand-edited) |
+| `daigram.mjs` | local server (live editing of sources, recording to disk, live agent link) + CLI (`new`, `build`, `extract`, `apply`, `query`, `send`, `replay`, `upgrade`, `commands`) |
 | `test/` | `core.test.mjs` (model/commands), `page.test.mjs` (headless Chrome), `cdp.mjs` (tiny DevTools driver) |
-| `examples/example-webapp.html` | a filled-in worked example (a generic web-service architecture) |
+| `examples/*.daigram.json` + `*.html` | worked examples as source + built page: a web-service architecture, and the UML showcase (`uml-showcase.cmds.jsonl` = the commands that drew it) |
 | `legacy-pixel-template.html` | the previous free-pixel engine (arbitrary x/y/w/h boxes); kept for old diagrams, **not** grid-compatible |
 
 ## Verify a diagram renders (optional)

@@ -5,11 +5,17 @@
 // DOM-free core the page uses (the <script id="daigram-core"> block of the HTML), so a command means
 // exactly the same thing headless and in the browser, and every recording replays in both.
 //
-//   daigram serve [dir] [--port 4173] [--rec-dir recordings]    serve pages, record sessions to disk, live link
+// A diagram's SOURCE is a pretty-printed x.daigram.json (title, header text, own CSS, the model) kept in git;
+// `build` turns it into x.html — the current engine with the data baked in, one self-contained file to send.
+// Every command below that takes <diagram> accepts either a .daigram.json or a (legacy / built) .html.
+//
+//   daigram serve [dir] [--port 4173] [--rec-dir recordings]    serve pages (x.daigram.json?view = edit the source live), record sessions, live link
 //   daigram commands [--json]                                     the command + query catalog
-//   daigram new <out.html> [--title T]                            a fresh, empty diagram from the template
-//   daigram apply <diagram.html> <cmds.jsonl|-> [-o out.html] [--keep-going] [--rec-dir D | --no-rec]
-//   daigram query <diagram.html> '<json query>'
+//   daigram new <x.daigram.json | x.html> [--title T]            a fresh, empty diagram
+//   daigram build <x.daigram.json>... [-o out.html]               source → self-contained x.html (current engine)
+//   daigram extract <x.html>... [-o out.daigram.json]             an existing .html → its source x.daigram.json
+//   daigram apply <diagram> <cmds.jsonl|-> [-o out] [--keep-going] [--rec-dir D | --no-rec]
+//   daigram query <diagram> '<json query>'
 //   daigram upgrade <diagram.html>... [--template T] [--dry-run]  swap in this engine; keep CONFIG, title, header, own CSS
 //   daigram replay <recording.jsonl> [--session ID]               headless replay; checks every model hash
 //   daigram send '<json>'|- [--page /x.html] [--port 4173]        drive the page open in the browser (live)
@@ -17,6 +23,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -70,6 +77,73 @@ export function writeHtml(core, html, root) {
   return core.spliceConfig(html, root).replace(/let BUILD="[^"]*"/, `let BUILD="cli-${Date.now().toString(36)}"`);
 }
 
+/* ============================ source files (.daigram.json) ============================
+   {"daigram":1, "title":"…", "heading":"<h1> html", "intro":"<p> html", "css":[own CSS lines], "root":{grid,boxes,wires,zones,desc,flows}}
+   Written by formatJson: anything that fits on one line stays on one line (a box, an arrow, a zone), so
+   moving a box changes one line in git. */
+export const isSource = f => /\.daigram\.json$/i.test(String(f));
+export const sourceOutHtml = f => String(f).replace(/\.daigram\.json$/i, ".html");
+const ALWAYS_OPEN = new Set(["^", "root", "boxes", "wires", "zones", "desc", "flows", "sub", "css"]);   // one item per line, however short
+export function formatJson(v, ind = "", key = "^") {   // "^" = the top level
+  const flat = JSON.stringify(v);
+  if (v === null || typeof v !== "object" || (!ALWAYS_OPEN.has(key) && ind.length + flat.length <= 120)) return flat;
+  const n = ind + "  ";
+  if (Array.isArray(v)) return v.length ? "[\n" + v.map(x => n + formatJson(x, n, "")).join(",\n") + "\n" + ind + "]" : "[]";
+  const ks = Object.keys(v).filter(k => v[k] !== undefined);
+  return ks.length ? "{\n" + ks.map(k => n + JSON.stringify(k) + ": " + formatJson(v[k], n, k)).join(",\n") + "\n" + ind + "}" : "{}";
+}
+export function readSource(text) {
+  let j; try { j = JSON.parse(text); } catch (e) { throw new Error("not JSON: " + e.message); }
+  if (!j || j.daigram !== 1 || !j.root || typeof j.root !== "object") throw new Error('not a daigram source (expected {"daigram":1, "root":{…}})');
+  return j;
+}
+export const sourceText = src => formatJson(src) + "\n";
+export const buildId = text => "src-" + crypto.createHash("sha1").update(text).digest("hex").slice(0, 10);   // new content → new id → stale browser autosaves are ignored
+const escHtml = t => String(t).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
+const HEAD_RE = /<div class="headinfo">\s*<h1>([\s\S]*?)<\/h1>\s*<p>([\s\S]*?)<\/p>\s*<\/div>/;
+// source → page html (the engine of templateHtml). source = the path Save writes back to (served editing), else null.
+export function sourceToHtml(src, templateHtml, { source = null, build } = {}) {
+  const core = loadDiagramHtml(templateHtml).core, root = core.buildDiagram(src.root);
+  let html = core.spliceConfig(templateHtml, root);
+  const title = src.title || "diagram";
+  html = html.replace(/<title>[^<]*<\/title>/, () => "<title>" + escHtml(title) + "</title>")
+    .replace(HEAD_RE, () => '<div class="headinfo">\n  <h1>' + (src.heading !== undefined ? src.heading : escHtml(title)) + "</h1>\n  <p>" + (src.intro || "") + "</p>\n  </div>")
+    .replace(/let BUILD="[^"]*"/, () => "let BUILD=" + JSON.stringify(build || buildId(sourceText(src))))
+    .replace(/let SOURCE=null;/, () => "let SOURCE=" + JSON.stringify(source) + ";");
+  if (src.css && src.css.length) html = html.replace("</style>", () => src.css.join("\n") + "\n</style>");
+  return html;
+}
+// an existing page → its source: model + title + header + the page's own CSS lines (vs the template)
+export function htmlToSource(html, templateHtml = fs.readFileSync(TEMPLATE, "utf8")) {
+  const d = loadDiagramHtml(html), h = html.match(HEAD_RE), t = templateHtml.match(HEAD_RE);
+  const title = ((html.match(/<title>([^<]*)<\/title>/) || [])[1] || "diagram").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+  const tplCss = new Set(styleOf(templateHtml).split("\n").map(l => l.trim()));
+  const css = styleOf(html).split("\n").map(l => l.trim()).filter(l => l && !tplCss.has(l));
+  const src = { daigram: 1, title };
+  if (h && !(t && h[1].trim() === t[1].trim() && h[2].trim() === t[2].trim())) {   // a customised header (the template's demo text is dropped)
+    if (h[1].trim() !== escHtml(title)) src.heading = h[1].trim();
+    if (h[2].trim()) src.intro = h[2].trim().replace(/\s+/g, " ");
+  }
+  if (css.length) src.css = css;
+  src.root = d.core.serializeDiagram(d.root);
+  return { src, core: d.core, root: d.root };
+}
+// Load any diagram file: {kind:"source"|"html", core, root, src?, html?}
+export function loadAny(file) {
+  const text = fs.readFileSync(file, "utf8");
+  if (!isSource(file)) return Object.assign({ kind: "html" }, loadDiagramHtml(text));
+  const src = readSource(text), core = loadCore();
+  core.addBoxClasses(core.boxClassesInCss((src.css || []).join("\n")));
+  return { kind: "source", core, src, root: core.normDiag(core.buildDiagram(src.root)) };
+}
+// Write a model back in the file's own format (out defaults to the input file).
+export function writeAny(d, root, out) {
+  if (isSource(out)) { const src = Object.assign({}, d.src || (d.html ? htmlToSource(d.html).src : { daigram: 1, title: "diagram" }));
+    src.root = d.core.serializeDiagram(root); fs.writeFileSync(out, sourceText(src)); return; }
+  if (d.kind === "source") { fs.writeFileSync(out, sourceToHtml(Object.assign({}, d.src, { root: d.core.serializeDiagram(root) }), fs.readFileSync(TEMPLATE, "utf8"))); return; }
+  fs.writeFileSync(out, writeHtml(d.core, d.html, root));
+}
+
 // Commands from a JSON array, a single JSON object, or JSONL (blank lines and // or # comments skipped).
 export function parseCommands(text) {
   const t = text.trim();
@@ -83,7 +157,7 @@ export const parseLog = text => text.split("\n").filter(l => l.trim()).map(l => 
 const seg = s => s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_");
 // recordings/<page path without .html>/<session>.jsonl — e.g. recordings/examples/example-webapp/2026-….jsonl
 export function recFile(recDir, page, session) {
-  const parts = String(page || "diagram").replace(/^\/+/, "").replace(/\.html?$/i, "").split("/").filter(Boolean).map(seg);
+  const parts = String(page || "diagram").replace(/^\/+/, "").replace(/(\.daigram\.json|\.html?)$/i, "").split("/").filter(Boolean).map(seg);
   return path.join(recDir, ...(parts.length ? parts : ["index"]), seg(String(session || "session")) + ".jsonl");
 }
 function appendLines(file, lines) {
@@ -161,8 +235,9 @@ function serveFile(res, base, rel) {
   let st; try { st = fs.statSync(p); } catch { return sendJson(res, 404, { ok: false, error: "not found: " + rel }); }
   if (st.isDirectory()) {
     if (fs.existsSync(path.join(p, "index.html"))) return serveFile(res, base, path.posix.join(rel, "index.html"));
-    const items = fs.readdirSync(p, { withFileTypes: true }).filter(d => d.isDirectory() ? !d.name.startsWith(".") && d.name !== "node_modules" : /\.html?$/i.test(d.name))
-      .map(d => { const href = path.posix.join(rel, d.name) + (d.isDirectory() ? "/" : ""); return `<li><a href="${encodeURI(href)}">${d.name}${d.isDirectory() ? "/" : ""}</a></li>`; });
+    const items = fs.readdirSync(p, { withFileTypes: true }).filter(d => d.isDirectory() ? !d.name.startsWith(".") && d.name !== "node_modules" : /\.html?$|\.daigram\.json$/i.test(d.name))
+      .map(d => { const src = isSource(d.name), href = path.posix.join(rel, d.name) + (d.isDirectory() ? "/" : "") + (src ? "?view" : "");
+        return `<li><a href="${encodeURI(href)}">${d.name}${d.isDirectory() ? "/" : ""}</a>${src ? " <small>(edit source)</small>" : ""}</li>`; });
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     return res.end(`<!doctype html><meta charset="utf-8"><title>daigram</title><body style="font:14px system-ui;background:#0e1116;color:#e6edf3"><h3>${rel}</h3><ul>${items.join("")}</ul>`);
   }
@@ -176,6 +251,13 @@ export function startServer({ dir = process.cwd(), port = DEFAULT_PORT, recDir, 
   const pending = new Map();   // agent requests waiting for a page's answer: id -> {resolve, timer}
   let seq = 0;
   const log = (...a) => { if (!quiet) console.log(...a); };
+  // editing sources: pages open on x.daigram.json?view are told when the file changes on disk (not by their own Save)
+  const inBase = rel => { const p = path.resolve(base, "." + rel); return p === base || p.startsWith(base + path.sep) ? p : null; };
+  const lastWritten = new Map(), watched = new Set();
+  const notifySource = rel => { for (const c of clients.values()) if (c.page === rel) c.res.write("data: " + JSON.stringify({ sourceChanged: true }) + "\n\n"); };
+  const watchSource = rel => { const abs = inBase(rel); if (!abs || watched.has(abs) || !fs.existsSync(abs)) return; watched.add(abs);
+    fs.watchFile(abs, { interval: 400 }, () => { let t; try { t = fs.readFileSync(abs, "utf8"); } catch { return; }
+      if (t === lastWritten.get(abs)) return; lastWritten.set(abs, t); log("source changed on disk: " + rel); notifySource(rel); }); };
   const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
     try {
@@ -190,7 +272,7 @@ export function startServer({ dir = process.cwd(), port = DEFAULT_PORT, recDir, 
         const id = ++seq; res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
         res.write(": connected\n\n");
         const c = { page: u.searchParams.get("page") || "", session: u.searchParams.get("session") || "", res, since: Date.now() };
-        clients.set(id, c); log(`live: ${c.page} (${c.session}) connected`);
+        clients.set(id, c); log(`live: ${c.page} (${c.session}) connected`); if (isSource(c.page)) watchSource(c.page);
         const ka = setInterval(() => res.write(": ka\n\n"), 20000);
         req.on("close", () => { clearInterval(ka); clients.delete(id); log(`live: ${c.page} (${c.session}) gone`); });
         return;
@@ -214,15 +296,31 @@ export function startServer({ dir = process.cwd(), port = DEFAULT_PORT, recDir, 
         });
         return sendJson(res, 200, Object.assign({ page: target.page, session: target.session }, result));
       }
+      if (u.pathname === "/api/source" && req.method === "PUT") {   // a page editing a source saves it
+        const b = await readBody(req), abs = b.path && isSource(b.path) && inBase(b.path);
+        if (!abs || !fs.existsSync(abs)) return sendJson(res, 400, { ok: false, error: "not a served .daigram.json: " + b.path });
+        const src = readSource(fs.readFileSync(abs, "utf8")), core = loadCore();
+        const st = b.state && core.stateRoot(b.state); if (!st) return sendJson(res, 400, { ok: false, error: "state.root missing" });
+        src.root = core.serializeDiagram(core.buildDiagram(st));
+        const text = sourceText(src); lastWritten.set(abs, text); fs.writeFileSync(abs, text);
+        log("saved " + b.path);
+        return sendJson(res, 200, { ok: true, build: buildId(text) });
+      }
       if (u.pathname.startsWith("/api/")) return sendJson(res, 404, { ok: false, error: "unknown endpoint " + u.pathname });
       const rel = decodeURIComponent(u.pathname);
+      if (isSource(rel) && (u.searchParams.has("view") || u.searchParams.has("edit"))) {   // edit a source live: the current engine + this file's data
+        const abs = inBase(rel); if (!abs || !fs.existsSync(abs)) return sendJson(res, 404, { ok: false, error: "not found: " + rel });
+        const text = fs.readFileSync(abs, "utf8"); lastWritten.set(abs, text);
+        const html = sourceToHtml(readSource(text), fs.readFileSync(TEMPLATE, "utf8"), { source: rel, build: buildId(text) });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(html);
+      }
       if (rel.startsWith("/recordings/") && !recBase.startsWith(base + path.sep)) return serveFile(res, recBase, rel.slice("/recordings".length));
       return serveFile(res, base, rel);
     } catch (e) { return sendJson(res, 500, { ok: false, error: e.message }); }
   });
   return new Promise(resolve => server.listen(port, "127.0.0.1", () => {
     log(`daigram serving ${base}\n  open:       http://127.0.0.1:${server.address().port}/\n  recordings: ${recBase}`);
-    resolve({ server, port: server.address().port, recDir: recBase, close: () => new Promise(r => { for (const c of clients.values()) c.res.end(); server.close(r); }) });
+    resolve({ server, port: server.address().port, recDir: recBase, close: () => new Promise(r => { for (const w of watched) fs.unwatchFile(w); for (const c of clients.values()) c.res.end(); server.close(r); }) });
   }));
 }
 
@@ -231,7 +329,7 @@ function args(argv) {
   const pos = [], opt = {};
   for (let i = 0; i < argv.length; i++) { const a = argv[i];
     if (a === "-o") opt.o = argv[++i];
-    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json", "dry-run", "force"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
+    else if (a.startsWith("--")) { const k = a.slice(2); if (["keep-going", "no-rec", "json", "dry-run", "force", "view"].includes(k)) opt[k] = true; else opt[k] = argv[++i]; }
     else pos.push(a); }
   return { pos, opt };
 }
@@ -262,8 +360,13 @@ async function main(argv) {
       return opt.json ? console.log(JSON.stringify(cat, null, 1)) : printCatalog(cat);
     }
     case "new": {
-      if (!pos[0]) die("usage: daigram new <out.html> [--title T]");
+      if (!pos[0]) die("usage: daigram new <x.daigram.json | x.html> [--title T]");
       if (fs.existsSync(pos[0])) die(pos[0] + " already exists");
+      if (isSource(pos[0])) {   // the recommended form: a source file (build it to .html to share)
+        const core = loadCore(), title = opt.title || path.basename(pos[0]).replace(/\.daigram\.json$/i, "");
+        const src = { daigram: 1, title, root: core.serializeDiagram(core.normDiag({ GRID: { cols: 18, rows: 11, cell: 64, gap: 5 } })) };
+        fs.writeFileSync(pos[0], sourceText(src)); console.log(JSON.stringify({ ok: true, wrote: pos[0] })); return;
+      }
       const { core, html } = loadDiagramHtml(fs.readFileSync(TEMPLATE, "utf8")), title = opt.title || path.basename(pos[0]).replace(/\.html?$/i, "");
       const empty = core.normDiag({ GRID: { cols: 18, rows: 11, cell: 64, gap: 5 } });
       const esc = s => s.replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
@@ -272,9 +375,31 @@ async function main(argv) {
       fs.writeFileSync(pos[0], out); console.log(JSON.stringify({ ok: true, wrote: pos[0] }));
       return;
     }
+    case "build": {
+      if (!pos.length) die("usage: daigram build <x.daigram.json>... [-o out.html]   (source → self-contained .html with the current engine)");
+      if (opt.o && pos.length > 1) die("-o needs exactly one input");
+      const tpl = fs.readFileSync(opt.template || TEMPLATE, "utf8");
+      for (const f of pos) { if (!isSource(f)) die(f + " is not a .daigram.json");
+        const out = opt.o || sourceOutHtml(f), html = sourceToHtml(readSource(fs.readFileSync(f, "utf8")), tpl);
+        fs.writeFileSync(out, html); console.log(JSON.stringify({ ok: true, source: f, wrote: out, bytes: html.length })); }
+      return;
+    }
+    case "extract": {
+      if (!pos.length) die("usage: daigram extract <x.html>... [-o out.daigram.json]   (an existing .html → its source)");
+      if (opt.o && pos.length > 1) die("-o needs exactly one input");
+      let bad = 0;
+      for (const f of pos) {
+        const out = opt.o || f.replace(/\.html?$/i, "") + ".daigram.json";
+        if (fs.existsSync(out) && !opt.force) { bad++; console.log(JSON.stringify({ ok: false, file: f, error: out + " exists (--force to overwrite)" })); continue; }
+        const { src, core, root } = htmlToSource(fs.readFileSync(f, "utf8")), unk = core.unknownFields(root);
+        fs.writeFileSync(out, sourceText(src));
+        console.log(JSON.stringify(Object.assign({ ok: true, file: f, wrote: out, css: (src.css || []).length }, unk.box.length || unk.wire.length ? { warning: "fields this engine ignores", unknownFields: unk } : {})));
+      }
+      return process.exit(bad ? 1 : 0);
+    }
     case "apply": {
-      if (pos.length < 2) die("usage: daigram apply <diagram.html> <cmds.jsonl|-> [-o out.html] [--keep-going] [--no-rec]");
-      const d = loadDiagram(pos[0]), cmds = parseCommands(readInput(pos[1]));
+      if (pos.length < 2) die("usage: daigram apply <diagram> <cmds.jsonl|-> [-o out] [--keep-going] [--no-rec]");
+      const d = loadAny(pos[0]), cmds = parseCommands(readInput(pos[1]));
       let root = d.root, failed = 0;
       const session = newSession("-cli"), rf = opt["no-rec"] ? null : recFile(path.resolve(opt["rec-dir"] || "recordings"), path.basename(pos[0]), session);
       const rec = [{ k: "session", seq: 0, ts: new Date().toISOString(), session, v: d.core.VERSION, src: "cli", page: path.basename(pos[0]),
@@ -292,7 +417,7 @@ async function main(argv) {
       if (rf) appendLines(rf, rec);
       if (failed && !opt["keep-going"]) { console.log(JSON.stringify({ ok: false, wrote: null, failed, recording: rf, note: "nothing written: fix the failing command and re-run" })); process.exit(1); }
       const target = opt.o || pos[0];
-      fs.writeFileSync(target, writeHtml(d.core, d.html, root));
+      writeAny(d, root, target);
       console.log(JSON.stringify({ ok: !failed, wrote: target, failed, hash: d.core.hash(root), recording: rf }));
       return process.exit(failed ? 1 : 0);
     }
@@ -315,14 +440,15 @@ async function main(argv) {
       return process.exit(bad ? 1 : 0);
     }
     case "query": {
-      if (pos.length < 2) die("usage: daigram query <diagram.html> '<json>'");
-      const d = loadDiagram(pos[0]), r = d.core.query(d.root, JSON.parse(readInput(pos[1])));
+      if (pos.length < 2) die("usage: daigram query <diagram> '<json>'");
+      const d = loadAny(pos[0]), r = d.core.query(d.root, JSON.parse(readInput(pos[1])));
       console.log(JSON.stringify(r, null, 1)); return process.exit(r.ok ? 0 : 1);
     }
     case "replay": {
       if (!pos[0]) die("usage: daigram replay <recording.jsonl> [--session ID] [-o out.html]");
       const core = loadCore(), r = replayHeadless(core, parseLog(fs.readFileSync(pos[0], "utf8")), opt.session);
-      if (opt.o && r.root) { const { html } = loadDiagramHtml(fs.readFileSync(TEMPLATE, "utf8")); fs.writeFileSync(opt.o, writeHtml(core, html, r.root)); r.wrote = opt.o; }
+      if (opt.o && r.root) { if (isSource(opt.o)) fs.writeFileSync(opt.o, sourceText({ daigram: 1, title: path.basename(opt.o).replace(/\.daigram\.json$/i, ""), root: core.serializeDiagram(r.root) }));
+        else { const { html } = loadDiagramHtml(fs.readFileSync(TEMPLATE, "utf8")); fs.writeFileSync(opt.o, writeHtml(core, html, r.root)); } r.wrote = opt.o; }
       delete r.root; console.log(JSON.stringify(r, null, 1)); return process.exit(r.ok ? 0 : 1);
     }
     case "send": {
@@ -334,7 +460,7 @@ async function main(argv) {
       console.log(JSON.stringify(r, null, 1)); return process.exit(r.ok ? 0 : 1);
     }
     default:
-      console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 16).map(l => l.replace(/^\/\/ ?/, "")).join("\n"));
+      console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 21).map(l => l.replace(/^\/\/ ?/, "")).join("\n"));
       return process.exit(cmd ? 2 : 0);
   }
 }

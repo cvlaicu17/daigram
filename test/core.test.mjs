@@ -331,3 +331,39 @@ test("the UML showcase builds from its command file and every expansion is overl
   assert.equal(new Set(Object.values(root.BOX).map(b => b.kind || "box")).size, d.core.BOX_KINDS.length - 1);   // every kind but plain "box"
   assert.deepEqual(plain(d.core.unknownFields(root)), { box: [], wire: [] });
 });
+
+/* ---- source files (.daigram.json) ↔ built .html ---- */
+test("source format: one entity per line, build → extract round-trips exactly", async () => {
+  const m = await import("../daigram.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dg-src-")), cli = path.join(ROOT_DIR, "daigram.mjs"), f = path.join(dir, "sys.daigram.json");
+  execFileSync("node", [cli, "new", f, "--title", "My <system>"]);
+  execFileSync("node", [cli, "apply", f, '[{"op":"addBox","id":"a","n":"A","col":1,"row":1,"cw":3,"ch":2},{"op":"addBox","id":"b","n":"B","col":6,"row":1,"cw":3,"ch":2},{"op":"addWire","from":"a","to":"b"}]', "--no-rec"]);
+  const text = fs.readFileSync(f, "utf8"), src = m.readSource(text);
+  assert.equal(src.title, "My <system>");
+  assert.match(text, /\n {6}"a": \{"n":"A",.*"col":1,"row":1,.*\},?\n/);          // a box is one line
+  assert.match(text, /"wires": \[\n {6}\{"from":"a","to":"b"\}\n/);                 // lists are one item per line
+  execFileSync("node", [cli, "apply", f, '{"op":"moveBox","id":"b","col":7,"row":1}', "--no-rec"]);
+  const after = fs.readFileSync(f, "utf8").split("\n"), before = text.split("\n");
+  assert.equal(after.filter((l, i) => l !== before[i]).length, 1);                  // moving a box changes exactly one line
+  execFileSync("node", [cli, "build", f]);
+  const html = fs.readFileSync(path.join(dir, "sys.html"), "utf8");
+  assert.match(html, /<title>My &lt;system&gt;<\/title>/); assert.match(html, /let SOURCE=null;/); assert.match(html, /let BUILD="src-/);
+  execFileSync("node", [cli, "extract", path.join(dir, "sys.html"), "-o", path.join(dir, "back.daigram.json")]);
+  assert.equal(fs.readFileSync(path.join(dir, "back.daigram.json"), "utf8"), fs.readFileSync(f, "utf8"));
+  const q = JSON.parse(execFileSync("node", [cli, "query", f, '{"q":"box","id":"b"}'], { encoding: "utf8" }));
+  assert.equal(q.col, 7);
+});
+
+test("extract keeps a page's own CSS and header; build puts them back", async () => {
+  const m = await import("../daigram.mjs"), tpl = fs.readFileSync(TEMPLATE, "utf8");
+  const old = tpl.replace("</style>", "  .box.aws{background:#1c1533;border-color:#a371f7}\n</style>")
+    .replace(/<title>[^<]*<\/title>/, "<title>C2 view</title>")
+    .replace(/<h1>[^<]*<\/h1>\s*<p>[\s\S]*?<\/p>/, "<h1>C2 — current</h1>\n  <p>As <b>deployed</b>.</p>");
+  const { src } = m.htmlToSource(old, tpl);
+  assert.deepEqual(plain({ title: src.title, heading: src.heading, intro: src.intro, css: src.css }),
+    { title: "C2 view", heading: "C2 — current", intro: "As <b>deployed</b>.", css: [".box.aws{background:#1c1533;border-color:#a371f7}"] });
+  const html = m.sourceToHtml(src, tpl);
+  assert.match(html, /<h1>C2 — current<\/h1>\s*<p>As <b>deployed<\/b>\.<\/p>/); assert.match(html, /\.box\.aws\{/);
+  const d = m.loadAny((() => { const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dg-x-")), "v.daigram.json"); fs.writeFileSync(f, m.sourceText(src)); return f; })());
+  ok(d.core.apply(d.root, { op: "setBox", id: "a", cls: "aws" }));                   // own classes are valid in a source too
+});
