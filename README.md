@@ -65,10 +65,67 @@ let FLOWS = [ { label:"Main path", nodes:["a","b"] } ];                // Flow b
 edge-to-edge force arrows to detour. If an arrow draws **dashed red**, open a
 channel or enlarge the grid.
 
+## Commands — the only way to change a diagram
+Every change goes through **one function, `dispatch(command)`**: toolbar buttons, mouse/touch gestures,
+agents, and replays all build a small JSON command, e.g.
+
+```json
+{"op":"addBox", "parent":"b", "id":"svc", "n":"Service", "cls":"blue", "col":1, "row":1, "cw":3, "ch":2}
+{"op":"addWire", "from":"a", "to":"b/svc", "label":"calls", "style":"f1"}
+{"op":"addWire", "from":"a", "to":"c", "path":[[4,3],[5,3],[5,4],[5,5],[6,5]]}
+{"op":"moveBox", "id":"b/svc", "col":5, "row":1}
+```
+
+- Boxes are addressed by **slash paths** (`"b/h3"` = box `h3` inside `b`'s sub-canvas); coordinates are
+  **cells local to the box's own level**.
+- Commands are **strict**: an unknown op/field, a wrong type, an overlap, a bad arrow path → a clear
+  error and *no change*. An explicit arrow `path` must be orthogonal free cells from next-to-`from` to next-to-`to`.
+- **Model** commands change the diagram (and undo history); **view** commands (`expand`, `select`, `zoom`,
+  `setMode`, `undo`…) only change what is shown and need a live page.
+- The full catalog with every field: `node daigram.mjs commands` (or `daigram.commands()` in the page).
+
+The model logic lives in `<script id="daigram-core">` — DOM-free, so the Node CLI runs the very same code.
+In the page: `window.daigram.dispatch(cmd)`, `.batch([cmds])`, `.query({q:"level",parent:"b"})`, `.replay(log)`.
+
+## Recording & replay (always on)
+Every dispatched command is recorded with its result and a hash of the model after it, plus a
+session header holding the starting state, so **every session can be replayed exactly**.
+
+```bash
+node daigram.mjs serve            # serves this folder on http://127.0.0.1:4173/
+# open http://127.0.0.1:4173/diagram-template.html — the Rec button shows "⏺ Rec → file"
+# every session lands in recordings/<page>/<session>.jsonl
+```
+
+- Opened as a plain `file://`, recording stays in the browser (last 500 lines) — `Log ⤓` downloads it.
+- **Replay** in the page with `Replay ⤒` (pick a `.jsonl`), or `…/page.html?replay=/recordings/…jsonl&speed=1`
+  to watch it at recorded speed. Headless: `node daigram.mjs replay recordings/…jsonl` — both report the
+  first step whose result or model hash differs from the recording.
+- Lines: `{"k":"session"}` header · `{"k":"cmd"}` command (replayable) · `{"k":"trace"}` pointer/engine
+  observations (debugging only).
+
+## Agents: drive a diagram without touching HTML
+```bash
+node daigram.mjs new my-diagram.html --title "My system"          # empty diagram from the template
+node daigram.mjs apply my-diagram.html cmds.jsonl                  # headless; all-or-nothing, recorded
+node daigram.mjs query my-diagram.html '{"q":"level","parent":""}'
+node daigram.mjs send '{"op":"addBox","n":"X","col":1,"row":1,"cw":3,"ch":2}'   # live: the page open via `serve`
+node daigram.mjs send '{"q":"view"}'                               # live: what is shown, red (unroutable) arrows
+```
+`apply` reads JSONL (or a JSON array), prints one result per command, and writes the file only if every
+command succeeded (`--keep-going` to write anyway).
+
+## Tests
+```bash
+npm test     # core unit tests + real-browser tests (headless Chrome via CDP; skipped if no Chrome)
+```
+
 ## What's here
 | file | what |
 |------|------|
 | `diagram-template.html` | the engine — **copy this to start a new diagram** |
+| `daigram.mjs` | local server (recording to disk, live agent link) + agent CLI (`apply`, `query`, `send`, `replay`, `new`, `commands`) |
+| `test/` | `core.test.mjs` (model/commands), `page.test.mjs` (headless Chrome), `cdp.mjs` (tiny DevTools driver) |
 | `examples/example-webapp.html` | a filled-in worked example (a generic web-service architecture) |
 | `legacy-pixel-template.html` | the previous free-pixel engine (arbitrary x/y/w/h boxes); kept for old diagrams, **not** grid-compatible |
 

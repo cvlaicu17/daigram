@@ -1,0 +1,11 @@
+{
+  "name": "daigram",
+  "private": true,
+  "description": "Self-contained interactive HTML diagram engine, driven by a command API",
+  "bin": { "daigram": "./daigram.mjs" },
+  "scripts": {
+    "serve": "node daigram.mjs serve",
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\""
+  },
+  "engines": { "node": ">=22" }
+}

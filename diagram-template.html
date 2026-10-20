@@ -181,6 +181,8 @@
     <button id="btnSaveFile" title="Write this layout back to an .html file (Chrome/Edge; else downloads)">Save to file ⤓</button>
     <button id="btnRec" title="Recording every user action for debugging — click to pause" style="border-color:#ff7b72aa;color:#ff7b72">⏺ Rec</button>
     <button id="btnLog" title="Download the recorded action log (JSONL)">Log ⤓</button>
+    <button id="btnReplay" title="Replay a recorded session (.jsonl) from its starting state">Replay ⤒</button>
+    <input type="file" id="fileReplay" accept=".jsonl,application/x-ndjson,application/json" style="display:none">
     <button id="btnImport">Import ⤒</button>
     <input type="file" id="fileImport" accept="application/json" style="display:none">
     <span class="zoomgrp">
@@ -224,6 +226,307 @@
    </div>
  </aside>
 </div>
+<script id="daigram-core">
+/* ============================ CORE: model + commands (DOM-free) ============================
+   The ONE way to change the diagram model. DaigramCore.apply(root, cmd) validates a plain-JSON
+   command and mutates the base tree; the page's dispatch() and the Node CLI (daigram.mjs) both go
+   through it, so a recorded command log replays to the identical model.
+   Box ids are slash-path fids ("b", "b/h3"); coordinates (col/row/cw/ch, wire path cells) are LOCAL
+   to the level that owns the box / wire. Keep this script DOM-free: daigram.mjs runs it in Node. */
+var DaigramCore=(function(){
+"use strict";
+const VERSION=1;
+const BOX_CLS=["blue","red","db","multi","violet","yellow"], WIRE_STYLES=["blue","f1","f2","f3"],
+      SIDES=["r","l","t","b"], ZONE_KINDS=["eks","edge"], TOOLS=["select","box","arrow","del"];
+
+/* ---- field types: [check, description]. In a spec, "type!" = required. ---- */
+const isId=v=>typeof v==="string"&&/^[^\/\s]+$/.test(v);
+const isFid=v=>typeof v==="string"&&v.split("/").every(isId);
+const isCell=p=>Array.isArray(p)&&p.length===2&&p.every(n=>Number.isInteger(n)&&n>=0);
+const TYPES={
+  str:[v=>typeof v==="string","a string"],
+  id:[isId,"a box id (no '/' or spaces)"],
+  fid:[isFid,'a box path like "b" or "b/h3"'],
+  fidOrNull:[v=>v===null||isFid(v),"a box path, or null"],
+  parent:[v=>v===""||isFid(v),'"" for the root, or the path of the box whose sub-canvas holds it'],
+  nat:[v=>Number.isInteger(v)&&v>=0,"an integer >= 0 (grid cells)"],
+  pos:[v=>Number.isInteger(v)&&v>=1,"an integer >= 1 (grid cells)"],
+  num:[v=>typeof v==="number"&&isFinite(v),"a number"],
+  bool:[v=>typeof v==="boolean","true or false"],
+  cls:[v=>typeof v==="string"&&v.split(/\s+/).filter(Boolean).every(t=>BOX_CLS.includes(t)),
+       'space-separated box classes from: '+BOX_CLS.join(" ")+' ("" = green)'],
+  style:[v=>v===""||WIRE_STYLES.includes(v),'a wire style: "" '+WIRE_STYLES.join(" ")],
+  side:[v=>v===null||SIDES.includes(v),"a box side r|l|t|b, or null for auto"],
+  kind:[v=>v===""||ZONE_KINDS.includes(v),'a zone kind: "" '+ZONE_KINDS.join(" ")],
+  tool:[v=>TOOLS.includes(v),"an edit tool: "+TOOLS.join(" ")],
+  path:[v=>v===null||(Array.isArray(v)&&v.length>0&&v.every(isCell)),"a list of [col,row] cells, or null for auto-route"],
+  text:[v=>v===null||typeof v==="string","a string, or null to remove"],
+  texts:[v=>v===null||(Array.isArray(v)&&v.every(s=>typeof s==="string")),"a list of strings, or null to remove"],
+  fids:[v=>Array.isArray(v)&&v.every(isFid),"a list of box paths"],
+  state:[v=>!!v&&typeof v==="object"&&!Array.isArray(v),"a saved state object ({v:4,root,expanded})"],
+};
+
+/* ---- the command catalog. view:true = handled by the live page only (not the headless model);
+        effect:true = has an outside side effect (download, reload…) and is skipped on replay. ---- */
+const COMMANDS={
+  addBox:{doc:"Add a box. Returns {fid}. parent = the box whose sub-canvas receives it (created if missing); omit for the root. id defaults to n0, n1, …",
+    args:{parent:"parent",id:"id",n:"str",s:"str",cls:"cls",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!"}},
+  moveBox:{doc:"Move a box within its level (new top-left cell).",args:{id:"fid!",col:"nat!",row:"nat!"}},
+  resizeBox:{doc:"Set a box's whole cell rectangle within its level.",args:{id:"fid!",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!"}},
+  setBox:{doc:"Change a box's title (n), subtitle (s) or classes (cls).",args:{id:"fid!",n:"str",s:"str",cls:"cls"}},
+  deleteBox:{doc:"Delete a box, its sub-canvas, and every wire touching it.",args:{id:"fid!"}},
+  reparentBox:{doc:"Move a box (with its subtree) into another level at (col,row). Wires that would then cross levels are dropped. Returns {fid}.",
+    args:{id:"fid!",parent:"parent!",col:"nat!",row:"nat!"}},
+  addSub:{doc:"Give a box an empty sub-canvas (makes it expandable).",args:{id:"fid!"}},
+  addWire:{doc:"Add an arrow from -> to (box paths). Auto-routed unless path is given; a path is a list of free cells, local to the level, from a cell next to `from` to a cell next to `to` (both boxes must be siblings). Returns {level,nth}.",
+    args:{from:"fid!",to:"fid!",label:"str",style:"style",path:"path",fromSide:"side",toSide:"side"}},
+  setWire:{doc:"Change an arrow, identified by from/to (+ nth when several share both ends). null clears path / sides.",
+    args:{from:"fid!",to:"fid!",nth:"nat",label:"str",style:"style",path:"path",fromSide:"side",toSide:"side"}},
+  deleteWire:{doc:"Delete an arrow (from/to, + nth).",args:{from:"fid!",to:"fid!",nth:"nat"}},
+  addZone:{doc:"Add a grouping rectangle to a level. Returns {index}.",args:{parent:"parent",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!",label:"str",kind:"kind"}},
+  setZone:{doc:"Change a zone (by index within its level).",args:{parent:"parent",index:"nat!",col:"nat",row:"nat",cw:"pos",ch:"pos",label:"str",kind:"kind"}},
+  deleteZone:{doc:"Delete a zone (by index within its level).",args:{parent:"parent",index:"nat!"}},
+  setDesc:{doc:"Set details-pane text for a box (cat, d, pts, eg, code); null removes a field.",args:{id:"fid!",cat:"text",d:"text",pts:"texts",eg:"text",code:"text"}},
+  addFlow:{doc:"Add a named flow highlight (nodes = box paths).",args:{label:"str!",nodes:"fids!"}},
+  deleteFlow:{doc:"Delete a flow by label.",args:{label:"str!"}},
+  growGrid:{doc:"Grow a level's grid; left/top also shift its content right/down.",args:{parent:"parent",right:"nat",bottom:"nat",left:"nat",top:"nat"}},
+  normalize:{doc:"Re-base the root content to a 2-cell margin and right-size the root grid.",args:{}},
+  load:{doc:"Replace the whole model with a saved state (as written by Export).",args:{state:"state!"}},
+  // ---- view commands (live page only) ----
+  expand:{view:true,doc:"Expand a box in place (show its sub-canvas).",args:{id:"fid!"}},
+  collapse:{view:true,doc:"Collapse an expanded box.",args:{id:"fid!"}},
+  expandAll:{view:true,doc:"Expand every box that has a sub-canvas.",args:{}},
+  collapseAll:{view:true,doc:"Collapse everything.",args:{}},
+  setMode:{view:true,doc:"Enter / leave edit mode.",args:{edit:"bool!"}},
+  setTool:{view:true,doc:"Pick the edit tool.",args:{tool:"tool!"}},
+  select:{view:true,doc:"Pin a visible box (details pane + highlight); null clears.",args:{id:"fidOrNull!"}},
+  showFlow:{view:true,doc:"Highlight a named flow.",args:{label:"str!"}},
+  zoom:{view:true,doc:"Set the zoom factor (0.1 - 3).",args:{zoom:"num!"}},
+  fit:{view:true,doc:"Turn auto-fit on / off.",args:{on:"bool!"}},
+  scroll:{view:true,doc:"Scroll the canvas (pixels).",args:{left:"num!",top:"num!"}},
+  info:{view:true,doc:"Show / hide the header text.",args:{on:"bool!"}},
+  details:{view:true,doc:"Open / close the details pane.",args:{open:"bool!"}},
+  undo:{view:true,doc:"Undo the last model change.",args:{}},
+  redo:{view:true,doc:"Redo.",args:{}},
+  save:{view:true,doc:"Save the layout in this browser (localStorage).",args:{}},
+  import:{view:true,doc:"Replace the model with a saved state and re-base it (the Import button).",args:{state:"state!"}},
+  export:{view:true,effect:true,doc:"Download the layout as JSON.",args:{}},
+  saveToFile:{view:true,effect:true,doc:"Write the layout into an .html file.",args:{}},
+  copyConfig:{view:true,effect:true,doc:"Copy the GRID/BOX/W config to the clipboard.",args:{}},
+  downloadLog:{view:true,effect:true,doc:"Download the recording as JSONL.",args:{}},
+  record:{view:true,effect:true,doc:"Pause / resume recording.",args:{on:"bool!"}},
+  reset:{view:true,effect:true,doc:"Forget the saved layout and reload the page.",args:{}},
+};
+const QUERIES={
+  commands:{doc:"This catalog: every command and query with its fields.",args:{}},
+  tree:{doc:"The whole model, serialized.",args:{}},
+  level:{doc:"The boxes, wires and zones of one level (box paths + local cells).",args:{parent:"parent"}},
+  box:{doc:"One box: geometry, props, whether it has a sub-canvas.",args:{id:"fid!"}},
+  free:{doc:"Is a cell rectangle free in a level?",args:{parent:"parent",col:"nat!",row:"nat!",cw:"pos!",ch:"pos!",except:"id"}},
+  hash:{doc:"Stable hash of the model (used to check replays).",args:{}},
+  view:{view:true,doc:"Live page only: mode, tool, zoom, expanded boxes, displayed geometry, red (unroutable) arrows, recording status.",args:{}},
+};
+
+/* Strict: unknown op, unknown field, missing required field or wrong type -> an error message. */
+function validate(specs,obj,key){
+  if(!obj||typeof obj!=="object"||Array.isArray(obj))return "expected a JSON object like {\""+key+"\":\"…\"}";
+  const name=obj[key], sp=Object.prototype.hasOwnProperty.call(specs,name)?specs[name]:null;
+  if(!sp)return "unknown "+key+" "+JSON.stringify(name)+" — known: "+Object.keys(specs).join(", ");
+  for(const k in obj){ if(k===key)continue;
+    if(!(k in sp.args))return name+": unknown field \""+k+"\" — allowed: "+(Object.keys(sp.args).join(", ")||"(none)"); }
+  for(const k in sp.args){ const t=sp.args[k], req=t.slice(-1)==="!", tn=req?t.slice(0,-1):t;
+    if(obj[k]===undefined){ if(req)return name+": missing required field \""+k+"\" ("+TYPES[tn][1]+")"; continue; }
+    if(!TYPES[tn][0](obj[k]))return name+": field \""+k+"\" must be "+TYPES[tn][1]+", got "+JSON.stringify(obj[k]); }
+  return null;
+}
+function catalog(){ const out={commands:{},queries:{},types:{}};
+  for(const k in COMMANDS)out.commands[k]=Object.assign({},COMMANDS[k]);
+  for(const k in QUERIES)out.queries[k]=Object.assign({},QUERIES[k]);
+  for(const k in TYPES)out.types[k]=TYPES[k][1];
+  return out; }
+
+/* ---- tree helpers ---- */
+function normDiag(d,g){ g=g||{cell:64,gap:5};
+  d.GRID=d.GRID||{cols:14,rows:9,cell:g.cell||64,gap:g.gap!==undefined?g.gap:5};
+  d.BOX=d.BOX||{}; d.W=d.W||[]; d.ZONES=d.ZONES||[]; d.DESC=d.DESC||{}; d.FLOWS=d.FLOWS||[]; return d; }
+const join=(pre,id)=>pre?pre+"/"+id:id;
+const inSub=fid=>f=>f===fid||f.indexOf(fid+"/")===0;
+function boxByFid(root,fid){ const p=String(fid).split("/"); let b=root.BOX[p[0]];
+  for(let i=1;i<p.length&&b;i++) b=(b.sub&&b.sub.BOX)?b.sub.BOX[p[i]]:null; return b||null; }
+function parentOf(root,fid){ const p=String(fid).split("/"), id=p.pop(), pf=p.join("/");   // the level holding fid
+  return {pf,id,diag:pf?((boxByFid(root,pf)||{}).sub||null):root}; }
+function allSubFids(D,prefix,out){ D=normDiag(D); for(const id in D.BOX){ const b=D.BOX[id];
+  if(b.sub){ out.push(prefix+id); allSubFids(b.sub,prefix+id+"/",out); } } return out; }
+function walkWires(root,fn){ (function walk(D,pre){ D=normDiag(D,root.GRID);   // fn(D, i, fullFrom, fullTo, levelPrefix); iterates backwards (safe to splice)
+  for(let i=D.W.length-1;i>=0;i--){ const w=D.W[i]; fn(D,i,join(pre,w.from),join(pre,w.to),pre); }
+  for(const k in D.BOX)if(D.BOX[k].sub)walk(D.BOX[k].sub,join(pre,k)); })(root,""); }
+const overlaps=(a,b)=>a.col<b.col+b.cw&&a.col+a.cw>b.col&&a.row<b.row+b.ch&&a.row+a.ch>b.row;
+function hitSibling(D,r,except){ for(const k in D.BOX){ if(k===except)continue; if(overlaps(r,D.BOX[k]))return k; } return null; }
+const touches=(b,c,r)=>(r>=b.row&&r<b.row+b.ch&&(c===b.col-1||c===b.col+b.cw))||(c>=b.col&&c<b.col+b.cw&&(r===b.row-1||r===b.row+b.ch));
+function fitGrid(D,r){ D.GRID.cols=Math.max(D.GRID.cols,r.col+r.cw); D.GRID.rows=Math.max(D.GRID.rows,r.row+r.ch); }
+function freeId(D,base){ let i=0; while(D.BOX[base+i])i++; return base+i; }
+function uniqueId(D,id){ while(D.BOX[id])id+="_"; return id; }
+// A wire lives at the common-ancestor level of its two ends, with from/to relative to that level.
+function commonDepth(from,to){ const fp=from.split("/"),tp=to.split("/"); let i=0;
+  while(i<fp.length-1&&i<tp.length-1&&fp[i]===tp[i])i++; return i; }
+function splitAt(from,to,d){ const fp=from.split("/"),tp=to.split("/");
+  return {anc:fp.slice(0,d).join("/"),lf:fp.slice(d).join("/"),lt:tp.slice(d).join("/")}; }
+
+/* ---- (de)serialization ---- */
+function clonePath(p){return p?p.map(a=>[a[0],a[1]]):p;}
+function serializeDiagram(D,g){ D=normDiag(D,g); const boxes={};
+  for(const id in D.BOX){const b=D.BOX[id];const c={...b};if(b.sub)c.sub=serializeDiagram(b.sub,g||D.GRID);boxes[id]=c;}
+  return{grid:{...D.GRID},boxes,wires:D.W.map(w=>({...w,path:clonePath(w.path)})),
+    zones:D.ZONES.map(z=>({...z})),desc:{...D.DESC},flows:D.FLOWS.map(f=>({...f,nodes:(f.nodes||[]).slice()}))};}
+function buildDiagram(s){const D=normDiag({});
+  D.GRID={...s.grid};D.W=(s.wires||[]).map(w=>({...w,path:clonePath(w.path)}));
+  D.ZONES=(s.zones||[]).map(z=>({...z}));D.DESC={...(s.desc||{})};D.FLOWS=(s.flows||[]).map(f=>({...f,nodes:(f.nodes||[]).slice()}));
+  D.BOX={};for(const id in(s.boxes||{})){const b={...s.boxes[id]};if(b.sub)b.sub=buildDiagram(b.sub);D.BOX[id]=b;}
+  return D;}
+function stateRoot(st){ return st.root?st.root:(st.boxes?{grid:st.grid,boxes:st.boxes,wires:st.wires,zones:st.zones}:null); }
+function stable(v){ if(Array.isArray(v))return "["+v.map(stable).join(",")+"]";
+  if(v&&typeof v==="object")return "{"+Object.keys(v).sort().filter(k=>v[k]!==undefined).map(k=>JSON.stringify(k)+":"+stable(v[k])).join(",")+"}";
+  return JSON.stringify(v); }
+function hash(root){ const s=stable(serializeDiagram(root)); let h=0x811c9dc5;   // FNV-1a 32
+  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;} return ("0000000"+h.toString(16)).slice(-8); }
+/* The CONFIG literals for a model, and splicing them into a page's source (keeps the markers). */
+function configText(root){ return "let GRID="+JSON.stringify(root.GRID)+";\nlet BOX="+JSON.stringify(root.BOX)+";\nlet W="+JSON.stringify(root.W)+
+  ";\nlet ZONES="+JSON.stringify(root.ZONES)+";\nlet DESC="+JSON.stringify(root.DESC)+";\nlet FLOWS="+JSON.stringify(root.FLOWS)+";"; }
+function spliceConfig(html,root){
+  const marked=/(\/\* =+ CONFIG \(edit this\) =+ \*\/\n)[\s\S]*?(\n\/\* =+ \*\/)/;
+  if(marked.test(html))return html.replace(marked,(m,a,b)=>a+configText(root)+b);
+  const legacy=/let GRID=[\s\S]*?\nlet ROOT=\{GRID/;   // files written by the old Save-to-file (markers lost)
+  if(legacy.test(html))return html.replace(legacy,()=>configText(root)+"\nlet ROOT={GRID");
+  throw new Error("no CONFIG block found in the page source");
+}
+
+/* ---- model operations (validate everything first, then mutate: a failed command changes nothing) ---- */
+function fail(msg){ const e=new Error(msg); e.cmdError=true; throw e; }
+function needBox(root,fid){ const b=boxByFid(root,fid); if(!b)fail('no box "'+fid+'"'); return b; }
+function needLevel(root,parent){ if(!parent)return root; const b=needBox(root,parent);
+  if(!b.sub)fail('box "'+parent+'" has no sub-canvas (addSub first)'); return normDiag(b.sub,root.GRID); }
+function checkFree(D,r,except){ const k=hitSibling(D,r,except);
+  if(k!==null)fail("cells col "+r.col+" row "+r.row+" size "+r.cw+"x"+r.ch+' overlap box "'+k+'"'); }
+function checkPath(D,lf,lt,path){
+  const A=D.BOX[lf],B=D.BOX[lt]; if(!A||!B)fail("a path is only allowed between two boxes of the same level");
+  for(let i=1;i<path.length;i++){ const[a,b]=path[i-1],[c,d]=path[i];
+    if(Math.abs(a-c)+Math.abs(b-d)!==1)fail("path cells "+(i-1)+" and "+i+" (["+a+","+b+"] -> ["+c+","+d+"]) are not orthogonal neighbours"); }
+  for(const[c,r] of path)for(const k in D.BOX){ const o=D.BOX[k];
+    if(c>=o.col&&c<o.col+o.cw&&r>=o.row&&r<o.row+o.ch)fail("path cell ["+c+","+r+'] is inside box "'+k+'"'); }
+  if(!touches(A,path[0][0],path[0][1]))fail('path must start on a cell next to "'+lf+'"');
+  const z=path[path.length-1]; if(!touches(B,z[0],z[1]))fail('path must end on a cell next to "'+lt+'"');
+}
+function findWire(root,from,to,nth){ nth=nth||0;
+  for(let d=commonDepth(from,to);d>=0;d--){ const s=splitAt(from,to,d), D=s.anc?(boxByFid(root,s.anc)||{}).sub:root; if(!D||!D.W)continue;
+    let k=0; for(let i=0;i<D.W.length;i++){ const w=D.W[i]; if(w.from===s.lf&&w.to===s.lt){ if(k===nth)return Object.assign({D,i,w},s); k++; } } }
+  fail("no wire "+from+" -> "+to+(nth?" #"+nth:"")); }
+function setWireFields(w,c){ if(c.label!==undefined){ if(c.label)w.label=c.label; else delete w.label; }
+  if(c.style!==undefined){ if(c.style)w.style=c.style; else delete w.style; }
+  for(const k of ["path","fromSide","toSide"]) if(c[k]!==undefined){ if(c[k]===null)delete w[k]; else w[k]=k==="path"?clonePath(c[k]):c[k]; } }
+function needZone(D,i){ if(i>=D.ZONES.length)fail("no zone #"+i+" (the level has "+D.ZONES.length+")"); return D.ZONES[i]; }
+function remapFlows(root,fn){ root.FLOWS.forEach(f=>{ f.nodes=(f.nodes||[]).map(fn).filter(n=>n!==null); }); }
+
+const OPS={
+  addBox(root,c){ const parent=c.parent||"", r={col:c.col,row:c.row,cw:c.cw,ch:c.ch};
+    const pb=parent?needBox(root,parent):null, D=parent?(pb.sub?normDiag(pb.sub,root.GRID):null):root;
+    if(D){ if(c.id!==undefined&&D.BOX[c.id])fail('a box "'+c.id+'" already exists in that level'); checkFree(D,r,null); }
+    const L=D||(pb.sub=normDiag({},root.GRID)), id=c.id!==undefined?c.id:freeId(L,"n");
+    L.BOX[id]={n:c.n!==undefined?c.n:"New box",s:c.s||"",cls:c.cls||"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+    fitGrid(L,r); return {fid:join(parent,id)}; },
+  moveBox(root,c){ const b=needBox(root,c.id), p=parentOf(root,c.id), r={col:c.col,row:c.row,cw:b.cw,ch:b.ch};
+    checkFree(p.diag,r,p.id); b.col=r.col; b.row=r.row; fitGrid(p.diag,r); },
+  resizeBox(root,c){ const b=needBox(root,c.id), p=parentOf(root,c.id), r={col:c.col,row:c.row,cw:c.cw,ch:c.ch};
+    checkFree(p.diag,r,p.id); Object.assign(b,r); fitGrid(p.diag,r); },
+  setBox(root,c){ const b=needBox(root,c.id); if(c.n!==undefined)b.n=c.n; if(c.s!==undefined)b.s=c.s; if(c.cls!==undefined)b.cls=c.cls; },
+  deleteBox(root,c){ needBox(root,c.id); const p=parentOf(root,c.id), gone=inSub(c.id);
+    walkWires(root,(D,i,f,t)=>{ if(gone(f)||gone(t))D.W.splice(i,1); });
+    delete p.diag.BOX[p.id]; if(p.diag.DESC)delete p.diag.DESC[p.id];
+    remapFlows(root,n=>gone(n)?null:n); return {fid:c.id}; },
+  reparentBox(root,c){ const b=needBox(root,c.id), src=parentOf(root,c.id), inMoved=inSub(c.id);
+    if(c.parent&&inMoved(c.parent))fail("cannot move a box into itself or its own subtree");
+    const tb=c.parent?needBox(root,c.parent):null, td=c.parent?(tb.sub?normDiag(tb.sub,root.GRID):null):root, r={col:c.col,row:c.row,cw:b.cw,ch:b.ch};
+    if(td===src.diag){ checkFree(td,r,src.id); b.col=r.col; b.row=r.row; fitGrid(td,r); return {fid:c.id}; }   // same level: plain move, wires kept
+    if(td)checkFree(td,r,null);
+    // only wires wholly inside the moved subtree's own levels survive; anything crossing (or pointing into it from above) is dropped
+    walkWires(root,(D,i,f,t,pre)=>{ const fi=inMoved(f),ti=inMoved(t); if(fi!==ti||(fi&&ti&&!inMoved(pre)))D.W.splice(i,1); });
+    const desc=src.diag.DESC&&src.diag.DESC[src.id];
+    delete src.diag.BOX[src.id]; if(src.diag.DESC)delete src.diag.DESC[src.id];
+    const L=td||(tb.sub=normDiag({},root.GRID)), nid=uniqueId(L,src.id);
+    b.col=r.col; b.row=r.row; L.BOX[nid]=b; if(desc)L.DESC[nid]=desc; fitGrid(L,r);
+    const fid=join(c.parent,nid); remapFlows(root,n=>inMoved(n)?fid+n.slice(c.id.length):n);
+    return {fid}; },
+  addSub(root,c){ const b=needBox(root,c.id); if(b.sub)fail('box "'+c.id+'" already has a sub-canvas'); b.sub=normDiag({},root.GRID); },
+  addWire(root,c){ needBox(root,c.from); needBox(root,c.to);
+    if(c.from===c.to)fail("self-loops are not supported yet");
+    const s=splitAt(c.from,c.to,commonDepth(c.from,c.to)), D=s.anc?normDiag(boxByFid(root,s.anc).sub,root.GRID):root;
+    if(c.path)checkPath(D,s.lf,s.lt,c.path);
+    const w={from:s.lf,to:s.lt}; setWireFields(w,c);
+    const nth=D.W.filter(x=>x.from===s.lf&&x.to===s.lt).length; D.W.push(w);
+    return {level:s.anc,nth}; },
+  setWire(root,c){ const f=findWire(root,c.from,c.to,c.nth);
+    if(c.path)checkPath(f.D,f.lf,f.lt,c.path); setWireFields(f.w,c); },
+  deleteWire(root,c){ const f=findWire(root,c.from,c.to,c.nth); f.D.W.splice(f.i,1); },
+  addZone(root,c){ const D=needLevel(root,c.parent), z={col:c.col,row:c.row,cw:c.cw,ch:c.ch,label:c.label||"",kind:c.kind||""};
+    D.ZONES.push(z); fitGrid(D,z); return {index:D.ZONES.length-1}; },
+  setZone(root,c){ const D=needLevel(root,c.parent), z=needZone(D,c.index);
+    for(const k of ["col","row","cw","ch","label","kind"])if(c[k]!==undefined)z[k]=c[k]; fitGrid(D,z); },
+  deleteZone(root,c){ const D=needLevel(root,c.parent); needZone(D,c.index); D.ZONES.splice(c.index,1); },
+  setDesc(root,c){ needBox(root,c.id); const p=parentOf(root,c.id), D=normDiag(p.diag,root.GRID), d=Object.assign({},D.DESC[p.id]);
+    for(const k of ["cat","d","pts","eg","code"])if(c[k]!==undefined){ if(c[k]===null)delete d[k]; else d[k]=Array.isArray(c[k])?c[k].slice():c[k]; }
+    if(Object.keys(d).length)D.DESC[p.id]=d; else delete D.DESC[p.id]; },
+  addFlow(root,c){ if(root.FLOWS.some(f=>f.label===c.label))fail('a flow "'+c.label+'" already exists');
+    for(const n of c.nodes)needBox(root,n); root.FLOWS.push({label:c.label,nodes:c.nodes.slice()}); },
+  deleteFlow(root,c){ const i=root.FLOWS.findIndex(f=>f.label===c.label); if(i<0)fail('no flow "'+c.label+'"'); root.FLOWS.splice(i,1); },
+  growGrid(root,c){ const D=needLevel(root,c.parent), dc=c.left||0, dr=c.top||0;
+    if(dc||dr){ for(const id in D.BOX){D.BOX[id].col+=dc;D.BOX[id].row+=dr;}
+      D.ZONES.forEach(z=>{z.col+=dc;z.row+=dr;}); D.W.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);}); }
+    D.GRID.cols+=(c.right||0)+dc; D.GRID.rows+=(c.bottom||0)+dr; return {grid:[D.GRID.cols,D.GRID.rows]}; },
+  normalize(root){ const D=root, ids=Object.keys(D.BOX); if(!ids.length)return {shift:[0,0]};
+    let minC=Infinity,minR=Infinity,maxC=-Infinity,maxR=-Infinity;
+    const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
+    ids.forEach(id=>{const b=D.BOX[id];acc(b.col,b.row,b.cw,b.ch);});     // key off the real content (boxes + wire paths)
+    D.W.forEach(w=>{if(w.path)w.path.forEach(([c,r])=>acc(c,r,1,1));});
+    const M=2, dc=M-minC, dr=M-minR;
+    if(dc||dr){ ids.forEach(id=>{D.BOX[id].col+=dc;D.BOX[id].row+=dr;});
+      D.W.forEach(w=>{if(w.path)w.path=w.path.map(([c,r])=>[c+dc,r+dr]);});
+      D.ZONES.forEach(z=>{z.col=Math.max(0,z.col+dc);z.row=Math.max(0,z.row+dr);}); }
+    D.GRID.cols=Math.max(12,Math.ceil(maxC+dc+M)); D.GRID.rows=Math.max(8,Math.ceil(maxR+dr+M));
+    return {shift:[dc,dr],grid:[D.GRID.cols,D.GRID.rows]}; },
+  load(root,c){ const src=stateRoot(c.state); if(!src)fail("state has neither root nor boxes"); return {root:buildDiagram(src)}; },
+};
+
+/* apply(root, cmd) -> {ok:true, …result} | {ok:false, error}. A load returns the new tree as .root. */
+function apply(root,cmd){
+  const err=validate(COMMANDS,cmd,"op"); if(err)return {ok:false,error:err};
+  if(COMMANDS[cmd.op].view)return {ok:false,error:cmd.op+": a view command — it only works in a live page"};
+  normDiag(root);
+  try{ return Object.assign({ok:true},OPS[cmd.op](root,cmd)||{}); }
+  catch(e){ if(e&&e.cmdError)return {ok:false,error:cmd.op+": "+e.message}; throw e; }
+}
+function levelInfo(root,parent){ const D=needLevel(root,parent);
+  const boxes=Object.keys(D.BOX).map(id=>{const b=D.BOX[id]; return {id,fid:join(parent,id),n:b.n,s:b.s||"",cls:b.cls||"",col:b.col,row:b.row,cw:b.cw,ch:b.ch,hasSub:!!b.sub};});
+  const seen={}, wires=D.W.map(w=>{const k=w.from+"\u0000"+w.to, nth=seen[k]=(seen[k]===undefined?0:seen[k]+1);
+    return Object.assign({from:join(parent,w.from),to:join(parent,w.to),nth},w.label?{label:w.label}:{},w.style?{style:w.style}:{},w.path?{path:clonePath(w.path)}:{},w.fromSide?{fromSide:w.fromSide}:{},w.toSide?{toSide:w.toSide}:{});});
+  return {parent,grid:{...D.GRID},boxes,wires,zones:D.ZONES.map((z,index)=>Object.assign({index},z))}; }
+const QOPS={
+  commands:()=>catalog(),
+  tree:root=>serializeDiagram(root),
+  level:(root,q)=>levelInfo(root,q.parent||""),
+  box:(root,q)=>{ const b=needBox(root,q.id); const o={fid:q.id,n:b.n,s:b.s||"",cls:b.cls||"",col:b.col,row:b.row,cw:b.cw,ch:b.ch,hasSub:!!b.sub};
+    if(b.sub)o.children=Object.keys(b.sub.BOX||{}); return o; },
+  free:(root,q)=>{ const D=needLevel(root,q.parent), k=hitSibling(D,q,q.except===undefined?null:q.except); return {free:k===null,overlaps:k}; },
+  hash:root=>({hash:hash(root)}),
+};
+function query(root,q){ const err=validate(QUERIES,q,"q"); if(err)return {ok:false,error:err};
+  if(QUERIES[q.q].view)return {ok:false,error:q.q+": a view query — it only works in a live page"};
+  normDiag(root);
+  try{ return Object.assign({ok:true},QOPS[q.q](root,q)); }
+  catch(e){ if(e&&e.cmdError)return {ok:false,error:q.q+": "+e.message}; throw e; } }
+
+return {VERSION,COMMANDS,QUERIES,TYPES,validate,catalog,apply,query,hash,normDiag,boxByFid,parentOf,allSubFids,
+        serializeDiagram,buildDiagram,stateRoot,configText,spliceConfig,touches};
+})();
+</script>
 <script>
 "use strict";
 const SVGNS="http://www.w3.org/2000/svg";
@@ -293,11 +596,8 @@ let FLOWS=[{label:"Main path",nodes:["a","b","d","g"]},{label:"Secondary",nodes:
 let ROOT={GRID,BOX,W,ZONES,DESC,FLOWS};
 let EXPANDED=new Set();                    // open fids, e.g. "b", "b/h3"
 const NEST_M=1, NEST_HEAD=1;               // container interior margin + header rows
-function normDiag(d){ d.GRID=d.GRID||{cols:14,rows:9,cell:(ROOT&&ROOT.GRID?ROOT.GRID.cell:64),gap:(ROOT&&ROOT.GRID?ROOT.GRID.gap:5)};
-  d.BOX=d.BOX||{}; d.W=d.W||[]; d.ZONES=d.ZONES||[]; d.DESC=d.DESC||{}; d.FLOWS=d.FLOWS||[]; return d; }
-function newSub(){ return normDiag({}); }
-function allSubFids(D,prefix,out){ D=normDiag(D); for(const id in D.BOX){ const b=D.BOX[id];
-  if(b.sub){ out.push(prefix+id); allSubFids(b.sub, prefix+id+"/", out); } } return out; }
+const normDiag=d=>DaigramCore.normDiag(d,ROOT&&ROOT.GRID);
+const allSubFids=(D,prefix,out)=>DaigramCore.allSubFids(D,prefix,out);
 
 /* Lay out one diagram level -> {boxes:[{fid,id,col,row,cw,ch,depth,container,hasSub,n,s,cls,desc}],
    wires, zones, w, h}; coords normalized so content starts at (0,0). Recurses into open subs. */
@@ -343,7 +643,7 @@ function layoutLevel(D, prefix, depth){
       for(const w of e._child.wires) wires.push(w);
       for(const z of e._child.zones) zones.push({...z, col:z.col+oc, row:z.row+orow});
     } }
-  for(let wi=0;wi<D.W.length;wi++){ const w=D.W[wi]; wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style, _srcW:D.W, _srcI:wi}); }
+  for(let wi=0;wi<D.W.length;wi++){ const w=D.W[wi]; wires.push({from:prefix+w.from, to:prefix+w.to, label:w.label, style:w.style, path:w.path, fromSide:w.fromSide, toSide:w.toSide, _srcW:D.W, _srcI:wi}); }
   for(const z of D.ZONES) zones.push({col:z.col,row:z.row,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
   let minC=Infinity,minR=Infinity,maxC=0,maxR=0;
   const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
@@ -358,7 +658,9 @@ function buildDisplay(){
     _depth:b.depth,_container:b.container,_hasSub:b.hasSub,_fid:b.fid,
     _base:b._basebox,_diag:b._diag,_ox:(b.col+M)-b._basebox.col,_oy:(b.row+M)-b._basebox.row};   // exact display→base: base = display − _o
     if(b.desc)Dd[b.fid]=b.desc; }
-  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]) Wd.push({from:w.from,to:w.to,label:w.label,style:w.style,_srcW:w._srcW,_srcI:w._srcI});
+  for(const w of L.wires) if(BOXd[w.from]&&BOXd[w.to]){ const A=BOXd[w.from];   // an explicit path is level-local: shift it with its level (wirePoints drops it if the reflow broke it)
+    Wd.push({from:w.from,to:w.to,label:w.label,style:w.style,fromSide:w.fromSide,toSide:w.toSide,
+      path:w.path?w.path.map(([c,r])=>[c+A._ox,r+A._oy]):undefined,_srcW:w._srcW,_srcI:w._srcI}); }
   for(const z of L.zones) Zd.push({col:z.col+M,row:z.row+M,cw:z.cw,ch:z.ch,label:z.label,kind:z.kind});
   return {GRID:{cols:Math.max(12,L.w+3*M),rows:Math.max(8,L.h+3*M),cell:ROOT.GRID.cell,gap:ROOT.GRID.gap},
           BOX:BOXd, W:Wd, ZONES:Zd, DESC:Dd, FLOWS:ROOT.FLOWS};
@@ -378,14 +680,13 @@ function render(){
   reset(); clearLevers();
   if(fitMode)doFit(); else applyZoom();
 }
-function toggleExpand(fid){ if(EXPANDED.has(fid))EXPANDED.delete(fid); else EXPANDED.add(fid); rec("expand",{fid,on:EXPANDED.has(fid)}); render(); autosave(); }
-function expandAll(){ EXPANDED=new Set(allSubFids(ROOT,"",[])); rec("expandAll"); render(); autosave(); }
-function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); rec("collapseAll"); render(); autosave(); }
+function expandAll(){ EXPANDED=new Set(allSubFids(ROOT,"",[])); render(); autosave(); }
+function collapseAll(){ if(!EXPANDED.size)return; EXPANDED.clear(); render(); autosave(); }
 /* the ⤢/⤡/＋ button on a box (id here is the BOX key = fid in display, plain id when collapsed) */
 function boxExpandBtn(id){
   const b=BOX[id]; if(!b)return; const has=(b._hasSub!==undefined?b._hasSub:!!b.sub);
-  if(!has){ if(editMode){ (ROOT.BOX[id]||b).sub=newSub(); commit(); layoutBoxes(); } return; }  // no sub → (edit only) create a stub
-  toggleExpand(id);   // has a sub → expand / collapse in BOTH view and edit mode
+  if(!has){ if(editMode)dispatch({op:"addSub",id},{src:"ui"}); return; }  // no sub → (edit only) create a stub
+  dispatch({op:EXPANDED.has(id)?"collapse":"expand",id},{src:"ui"});   // has a sub → expand / collapse in BOTH view and edit mode
 }
 
 const stage=document.getElementById("stage"), gridSvg=document.getElementById("grid"), wiresEl=document.getElementById("wires");
@@ -508,7 +809,7 @@ function markers(){return `<defs>
 function wirePoints(w){
   const A=BOX[w.from], B=BOX[w.to]; if(!A||!B)return null;
   let cells, fs, ts, warn=false;
-  if(w.path&&w.path.length){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells,(fs==="l"||fs==="r")?"H":"V"); }
+  if(w.path&&w.path.length&&pathFits(w.path,A,B)){ cells=w.path.map(a=>[a[0],a[1]]); fs=inferSide(A,cells[0]); ts=inferSide(B,cells[cells.length-1]); ENG.commit(cells,(fs==="l"||fs==="r")?"H":"V"); }
   else { let r=ENG.route(w.from,w.to,w.fromSide,w.toSide);
     if(!r){ r=ENG.route(w.from,w.to,w.fromSide,w.toSide,true); } // relaxed: still routes AROUND boxes (may share a lane) — valid, NOT a warning
     if(!r){ // last resort — only if no box-avoiding orthogonal path exists at all (target enclosed)
@@ -523,6 +824,10 @@ function wirePoints(w){
   pts.push(borderPt(B,ts,cells[cells.length-1]));
   return {pts, fs, ts, warn};
 }
+// An explicit path is used only while it still connects A to B without entering a leaf box
+// (an expand reflow can move one end away); otherwise the wire is auto-routed instead.
+function pathFits(path,A,B){ const T=DaigramCore.touches, s=path[0], e=path[path.length-1];
+  return T(A,s[0],s[1])&&T(B,e[0],e[1])&&!path.some(([c,r])=>ENG.isBox(c,r)); }
 function routeAndDraw(){
   ENG=makeEngine();
   wiresEl.innerHTML=markers();
@@ -628,7 +933,9 @@ function reset(){
   clearLevers();
 }
 let pinned=null,pinnedFlow=null;
-function pin(id){pinnedFlow=null;pinned=id;select(id);for(const bid in boxEls)boxEls[bid].classList.toggle("pinned",bid===id);rec("select",{fid:id});}
+function pin(id){pinnedFlow=null;pinned=id;select(id);for(const bid in boxEls)boxEls[bid].classList.toggle("pinned",bid===id);}
+// Edit-mode selection: pin + orange ring + resize levers.
+function selectEdit(id){ selBox=id; pin(id); for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id); }
 
 /* ============================ EDIT MODE ============================ */
 let editMode=false, tool="select", selBox=null;
@@ -654,7 +961,6 @@ function cellsFree(col,row,cw,ch,exceptId){
 function drawGridOverlay(){ stage.style.setProperty("--cell",GRID.cell+"px"); }  // CSS-background grid (see .stage rule)
 function setMode(on){editMode=on; document.body.classList.toggle("edit",on); stage.classList.toggle("editing",on);
   document.getElementById("btnEdit").classList.toggle("on",on);
-  rec("mode",{on});
   if(on){drawGridOverlay();} else {clearLevers(); selBox=null;}
   if(EXPANDED.size) render(); else layoutBoxes();   // keep expansions across the mode toggle; refresh per-box buttons
   clearGhosts();
@@ -693,9 +999,10 @@ function beginDrag(e,onMove,onEnd){
   }
 }
 function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,cw:b.cw,ch:b.ch};
-  // expanded: b is a display-overlay box — collide vs same-level siblings and commit to the BASE box.
-  // collapsed: b IS the live ROOT box — original cellsFree behaviour, edits already persist.
-  const expanded=EXPANDED.size>0, base=expanded?(b._base||rootBoxByFid(id)):null, diag=b._diag, ox=b._ox||0, oy=b._oy||0;
+  // Live feedback edits the displayed box only; the drop dispatches ONE resizeBox in base (level-local)
+  // coords. Expanded: b is a display-overlay box (base = display − _o), collide vs same-level siblings.
+  // Collapsed: b is the ROOT box itself, so it is put back before the command applies the change.
+  const expanded=EXPANDED.size>0, diag=b._diag, ox=b._ox||0, oy=b._oy||0;
   const free=(c,r,cw,ch)=> expanded ? (!!diag&&siblingFree(diag,c,r,cw,ch,id)) : cellsFree(c,r,cw,ch,id);
   beginDrag(e,ev=>{const[c,r]=evCell(ev);let n={...orig};
     if(dir.indexOf("e")>=0)n.cw=Math.max(1,c-n.col+1);
@@ -703,8 +1010,11 @@ function startResize(e,id,dir){const b=BOX[id];const orig={col:b.col,row:b.row,c
     if(dir.indexOf("w")>=0){const right=orig.col+orig.cw;n.col=Math.min(c,right-1);n.cw=right-n.col;}
     if(dir.indexOf("n")>=0){const bot=orig.row+orig.ch;n.row=Math.min(r,bot-1);n.ch=bot-n.row;}
     if(free(n.col,n.row,n.cw,n.ch)){Object.assign(b,n);layoutBoxes();showLevers(id);routeAndDraw();}},
-    ()=>{ if(expanded&&base){ base.col=Math.max(0,b.col-ox); base.row=Math.max(0,b.row-oy); base.cw=b.cw; base.ch=b.ch; }
-          commit(); });   // FROZEN in edit mode: keep the on-screen frame (no re-project); auto-scale re-applies on exit (setMode → render)
+    ()=>{ const n={col:b.col,row:b.row,cw:b.cw,ch:b.ch}; if(n.col===orig.col&&n.row===orig.row&&n.cw===orig.cw&&n.ch===orig.ch)return;
+          Object.assign(b,orig);
+          const res=dispatch({op:"resizeBox",id,col:Math.max(0,n.col-ox),row:Math.max(0,n.row-oy),cw:n.cw,ch:n.ch},{src:"ui",view:false});
+          if(res.ok)Object.assign(b,n);   // FROZEN in edit mode: keep the on-screen frame (no re-project); auto-scale re-applies on exit (setMode → render)
+          layoutBoxes(); showLevers(id); routeAndDraw(); });
 }
 
 /* -- box create (drag over cells) -- */
@@ -731,20 +1041,21 @@ function stageDown(e){
     beginDrag(e,ev=>{const p=pt(ev);
         stageWrap.scrollLeft-=(p.clientX-px); stageWrap.scrollTop-=(p.clientY-py);
         px=p.clientX; py=p.clientY; maybeGrow();},
-      ()=>stage.classList.remove("panning"));
+      ()=>{stage.classList.remove("panning"); dispatch({op:"scroll",left:stageWrap.scrollLeft,top:stageWrap.scrollTop},{src:"ui"});});
   }
 }
-let idSeq=0;
-function newId(){let id;do{id="n"+(idSeq++);}while(BOX[id]);return id;}
-function addBox(r){const id=newId();
-  const box={n:"New box",s:"",cls:"",col:r.col,row:r.row,cw:r.cw,ch:r.ch};
+// Display cell → coordinates local to the sub-canvas of the expanded container `host`. Uses the real
+// display offset of a box already in that level (the level is re-normalized and may have reflowed);
+// an empty level falls back to the container's interior origin.
+function toLocal(host,c,r){ const hb=rootBoxByFid(host), L=hb&&hb.sub;
+  for(const k in BOX){ const o=BOX[k]; if(L&&o._diag===L)return [Math.max(0,c-o._ox),Math.max(0,r-o._oy)]; }
+  const C=BOX[host]; return [Math.max(0,c-(C.col+NEST_M)),Math.max(0,r-(C.row+NEST_HEAD+NEST_M))]; }
+function addBox(r){
   const host=dropContainerAt(r.col+r.cw/2, r.row+r.ch/2, "");   // expanded container under the drop centre
   setTool("select");
-  if(host){ const C=BOX[host], hb=rootBoxByFid(host); if(hb){ hb.sub=hb.sub||newSub();   // add into that container's sub (BASE tree)
-      box.col=Math.max(0, r.col-(C.col+NEST_M)); box.row=Math.max(0, r.row-(C.row+NEST_HEAD+NEST_M));   // display → container-local
-      let nid=id; while(hb.sub.BOX[nid])nid+="_"; hb.sub.BOX[nid]=box;
-      renderKeepView(); pin(host+"/"+nid); showLevers(host+"/"+nid); commit(); return; } }
-  ROOT.BOX[id]=box; renderKeepView(); pin(id); showLevers(id); commit();   // top level
+  const [col,row]=host?toLocal(host,r.col,r.row):[r.col,r.row];
+  const res=dispatch({op:"addBox",parent:host||"",n:"New box",col,row,cw:r.cw,ch:r.ch},{src:"ui"});
+  if(res.ok&&BOX[res.fid]){ pin(res.fid); showLevers(res.fid); }
 }
 
 /* -- box move + click, per element -- */
@@ -764,26 +1075,23 @@ function attachBoxHandlers(el,id){
   });
   el.addEventListener("pointerenter",()=>{if(!editMode&&!dragging&&!pinned&&!pinnedFlow)select(id);});   // a pinned selection OR an active flow is sticky — hover won't steal it
   el.addEventListener("click",e=>{e.stopPropagation();if(moved){moved=false;return;}
-    if(!editMode){pin(id);return;}
+    if(!editMode){dispatch({op:"select",id},{src:"ui"});return;}
     if(tool!=="select")return;
     const now=Date.now();                              // manual double-tap → inline text edit (touch + mouse)
     if(lastTap.id===id&&now-lastTap.t<350){lastTap={id:null,t:0};startTextEdit(id);return;}
     lastTap={id,t:now};
-    selBox=id;pin(id);showLevers(id);boxEls[id]&&boxEls[id].classList.add("sel");});
+    if(selBox!==id)dispatch({op:"select",id},{src:"ui"});});
 }
 /* -- inline title editing (double-tap a box) -- */
 let editingText=null;
 // Resolve a (possibly nested) display fid like "msvc/vendorcode/robinpub" to the box object in the
 // BASE tree (ROOT), so edits made while a box is expanded persist instead of dying with the overlay.
-function rootBoxByFid(fid){ const p=String(fid).split("/"); let b=ROOT.BOX[p[0]];
-  for(let i=1;i<p.length&&b;i++){ b=(b.sub&&b.sub.BOX)?b.sub.BOX[p[i]]:null; } return b||null; }
-function setBoxName(fid,name){ const rb=rootBoxByFid(fid); if(rb)rb.n=name; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].n=name; }
-function setBoxSub(fid,sub){ const rb=rootBoxByFid(fid); if(rb)rb.s=sub; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].s=sub; }
-function setBoxCls(fid,cls){ const rb=rootBoxByFid(fid); if(rb)rb.cls=cls; if(BOX[fid]&&BOX[fid]!==rb)BOX[fid].cls=cls; }
+const rootBoxByFid=fid=>DaigramCore.boxByFid(ROOT,fid);
+// Change a box's n/s/cls through the command layer, then mirror it onto the displayed overlay box
+// (expanded mode) without re-projecting — editing text must never move anything.
+function setBoxProps(fid,props){ const res=dispatch(Object.assign({op:"setBox",id:fid},props),{src:"ui",view:false});
+  if(res.ok&&BOX[fid]&&BOX[fid]!==rootBoxByFid(fid))Object.assign(BOX[fid],props); return res; }
 // ---- drag-to-reparent (move a box into an expanded container, any level) ----
-// The diagram (ROOT or a sub) that directly holds fid, plus the box's local id.
-function parentDiagramOf(fid){ const p=String(fid).split("/"); const id=p.pop();
-  if(!p.length) return {diag:ROOT,id}; const pb=rootBoxByFid(p.join("/")); return {diag:(pb&&pb.sub)||null,id}; }
 // Innermost expanded container whose display rect contains (c,r), excluding the dragged box + its subtree.
 function dropContainerAt(c,r,dragFid){ let best=null,bd=-1;
   for(const fid in BOX){ const b=BOX[fid]; if(!b._container)continue;
@@ -801,29 +1109,12 @@ function siblingFree(diag,col,row,cw,ch,exceptId){ if(col<0||row<0)return false;
 function renderKeepView(){ const w=stageWrap,sl=w.scrollLeft,st=w.scrollTop,f=fitMode; fitMode=false; render(); fitMode=f; w.scrollLeft=sl; w.scrollTop=st; }
 // Restore selection + resize handles after an edit-triggered render (render() clears them).
 function reselect(id){ if(!BOX[id])return; selBox=id; for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id); }
-// Remove every wire (at any level) that crosses the boundary of the subtree rooted at fid — i.e. exactly
-// one endpoint is inside the moved subtree. Those become cross-level after the move; only intra-level allowed.
-function pruneSubtreeCrossings(fid){ const inSub=f=>f===fid||f.indexOf(fid+"/")===0;
-  (function walk(D,pre){ if(D&&D.W) for(let i=D.W.length-1;i>=0;i--){
-    const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)!==inSub(t))D.W.splice(i,1); }
-    if(D&&D.BOX) for(const k in D.BOX){ const b=D.BOX[k]; if(b.sub)walk(b.sub,pre?pre+"/"+k:k); } })(ROOT,""); }
 // Re-parent the box at oldFid into the container targetFid, placing it at the display cell (dropC,dropR).
+// The command drops wires that would cross levels and the page remaps EXPANDED for the moved subtree.
 function reparentInto(oldFid,targetFid,dropC,dropR){
-  if(targetFid===oldFid||targetFid.indexOf(oldFid+"/")===0){render();return;}   // no drop into self/descendant
-  const src=parentDiagramOf(oldFid), tb=rootBoxByFid(targetFid);
-  if(!src.diag||!tb){render();return;} const box=src.diag.BOX[src.id]; if(!box){render();return;}
-  if(!tb.sub)tb.sub=newSub();
-  const td=BOX[targetFid], lc=Math.max(0,dropC-(td.col+NEST_M)), lr=Math.max(0,dropR-(td.row+NEST_HEAD+NEST_M));
-  if(src.diag===tb.sub){ box.col=lc; box.row=lr; render(); commit(); return; }  // same container: reposition, keep wires
-  const desc=src.diag.DESC&&src.diag.DESC[src.id];
-  delete src.diag.BOX[src.id]; if(src.diag.DESC)delete src.diag.DESC[src.id];
-  pruneSubtreeCrossings(oldFid);                                                // only intra-level wires survive a level change
-  let nid=src.id; while(tb.sub.BOX[nid])nid+="_";
-  box.col=lc; box.row=lr; tb.sub.BOX[nid]=box;
-  if(desc){tb.sub.DESC=tb.sub.DESC||{}; tb.sub.DESC[nid]=desc;}
-  const newFid=targetFid+"/"+nid, re=new Set();                                 // remap expanded state for the moved subtree
-  EXPANDED.forEach(f=>{ if(f===oldFid)re.add(newFid); else if(f.indexOf(oldFid+"/")===0)re.add(newFid+f.slice(oldFid.length)); else re.add(f); });
-  EXPANDED=re; renderKeepView(); reselect(newFid); commit();          // keep the view put + reselect the moved box
+  const [col,row]=toLocal(targetFid,dropC,dropR);
+  const res=dispatch({op:"reparentBox",id:oldFid,parent:targetFid,col,row},{src:"ui"});
+  if(res.ok)reselect(res.fid); else renderKeepView();   // kept view + reselected box; a refused drop snaps back
 }
 function startTextEdit(id){
   if(!editMode)return; const el=boxEls[id]; if(!el)return;
@@ -840,10 +1131,10 @@ function startTextEdit(id){
     editingText=null;
     const t=n.textContent.replace(/\s+/g," ").trim();
     const cur=(rootBoxByFid(id)||BOX[id]||{}).n;
-    if(save&&t!==cur){setBoxName(id,t);layoutBoxes();fillEditFields(id);commit();} else layoutBoxes();   // write to the base tree so it persists
+    if(save&&t!==cur){setBoxProps(id,{n:t});layoutBoxes();fillEditFields(id);} else layoutBoxes();   // write to the base tree so it persists
     // undo any page scroll the iOS keyboard introduced, and keep the box selected
     window.scrollTo(0,0); if(document.scrollingElement)document.scrollingElement.scrollTop=0;
-    if(editMode&&tool==="select"){selBox=id;pin(id);showLevers(id);}
+    if(editMode&&tool==="select")selectEdit(id);
   }
   function onBlur(){finish(true);}
   function onKey(e){e.stopPropagation();
@@ -854,22 +1145,25 @@ function startTextEdit(id){
 let dragging=false,moved=false;
 function startViewDrag(){/* view mode: no drag, hover/click only */}
 function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:b.col,row:b.row};moved=false;dragging=true;
-  clearGhosts(); selBox=id;pin(id);
+  clearGhosts();
   // Select on pointerdown: the stage pointer-capture (beginDrag) retargets the post-pointerup
-  // click to the stage, so the box click never fires — do the visual selection here instead.
-  for(const k in boxEls)boxEls[k].classList.toggle("sel",k===id); showLevers(id);
-  if(EXPANDED.size===0){                                    // collapsed: in-place move on ROOT (persists directly)
+  // click to the stage, so the box click never fires — do the selection here instead.
+  if(selBox!==id)dispatch({op:"select",id},{src:"ui"}); else selectEdit(id);
+  if(EXPANDED.size===0){                                    // collapsed: b is the ROOT box — live-drag it, then put it back and dispatch the move
     beginDrag(e,ev=>{const[c,r]=evCell(ev);const nc=orig.col+(c-c0),nr=orig.row+(r-r0);
       if(nc!==b.col||nr!==b.row)moved=true;
       if(cellsFree(nc,nr,b.cw,b.ch,id)){b.col=nc;b.row=nr;layoutBoxes();showLevers(id);}},   // reroute only after drop, not live per-frame
-      ()=>{dragging=false; if(moved)routeAndDraw(); commit();});
+      ()=>{dragging=false; if(b.col===orig.col&&b.row===orig.row)return;
+        const to={col:b.col,row:b.row}; b.col=orig.col; b.row=orig.row;
+        dispatch({op:"moveBox",id,col:to.col,row:to.row},{src:"ui",view:false});
+        layoutBoxes(); showLevers(id); routeAndDraw();});
     return;
   }
   // expanded: b is a display-overlay box. Free-drag for feedback; on drop either (a) re-parent, when the
   // box's CENTRE crosses into a container that isn't its current parent, or (b) move in place within its
   // own level — mapping display→base exactly (base = display − _o) and colliding vs same-level siblings only.
   const curParent=id.split("/").slice(0,-1).join("/");
-  const base=b._base||rootBoxByFid(id), diag=b._diag, ox=b._ox||0, oy=b._oy||0;
+  const diag=b._diag, ox=b._ox||0, oy=b._oy||0;
   let dropFid=curParent, lc=orig.col, lr=orig.row;
   beginDrag(e,ev=>{const[c,r]=evCell(ev); lc=orig.col+(c-c0); lr=orig.row+(r-r0);
       if(lc!==b.col||lr!==b.row)moved=true;
@@ -879,29 +1173,19 @@ function startMove(e,id){const b=BOX[id];const[c0,r0]=evCell(e);const orig={col:
     ()=>{dragging=false; highlightDrop(null);
       if(!moved)return;                                                // plain click/tap → keep selection + double-tap
       if(dropFid&&dropFid!==curParent){ reparentInto(id,dropFid,lc,lr); return; }   // crossed into another container
-      if(base&&diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)){            // in-level move → write the base box (FROZEN: no re-project)
-        base.col=Math.max(0,lc-ox); base.row=Math.max(0,lr-oy); commit(); routeAndDraw(); }   // keep the on-screen frame, but reroute now the move succeeded; auto-scale re-applies on exit Edit mode
+      const ok=diag&&siblingFree(diag,lc,lr,b.cw,b.ch,id)&&                        // in-level move → one moveBox in base coords (FROZEN: no re-project)
+        dispatch({op:"moveBox",id,col:Math.max(0,lc-ox),row:Math.max(0,lr-oy)},{src:"ui",view:false}).ok;
+      if(ok)routeAndDraw();                                            // keep the on-screen frame, but reroute now the move succeeded; auto-scale re-applies on exit Edit mode
       else { b.col=orig.col; b.row=orig.row; layoutBoxes(); showLevers(id); routeAndDraw(); } });   // overlap → snap back in place (still frozen)
 }
-function delBox(id){ const p=parentDiagramOf(id); if(!p.diag||!p.diag.BOX[p.id])return;   // delete from the BASE tree (persists)
+function delBox(id){                                       // delete from the BASE tree (the command prunes wires + desc)
+  if(!dispatch({op:"deleteBox",id},{src:"ui",view:false}).ok)return;
   const inSub=f=>f===id||f.indexOf(id+"/")===0;
-  (function walk(D,pre){ if(D&&D.W)for(let i=D.W.length-1;i>=0;i--){ const w=D.W[i], f=pre?pre+"/"+w.from:w.from, t=pre?pre+"/"+w.to:w.to; if(inSub(f)||inSub(t))D.W.splice(i,1); }
-    if(D&&D.BOX)for(const k in D.BOX)if(D.BOX[k].sub)walk(D.BOX[k].sub,pre?pre+"/"+k:k); })(ROOT,"");   // prune base wires touching the subtree
-  delete p.diag.BOX[p.id]; if(p.diag.DESC)delete p.diag.DESC[p.id];
-  EXPANDED=new Set([...EXPANDED].filter(f=>!inSub(f)));                                    // forget expanded fids under it
   for(const k of Object.keys(BOX))if(inSub(k))delete BOX[k];                              // drop from the frozen display now (no reflow; auto-scale re-applies on exit)
   for(let i=W.length-1;i>=0;i--){ const w=W[i]; if(inSub(w.from)||inSub(w.to))W.splice(i,1); }
-  buildBoxes();routeAndDraw();clearLevers();reset();commit(); }
+  buildBoxes();routeAndDraw();clearLevers();reset(); }
 
 /* -- arrow draw (drag box→cells→box) -- */
-// Store a new wire in the BASE tree at the common-ancestor level, with from/to relative to that level
-// (bare id for siblings, slash-path cross-subtree) — mirrors the authored wire format, so it persists.
-function addWireBase(fromFid,toFid){
-  const fp=String(fromFid).split("/"), tp=String(toFid).split("/");
-  let i=0; while(i<fp.length-1&&i<tp.length-1&&fp[i]===tp[i])i++;   // common-ancestor depth (leaf ids excluded)
-  const anc=fp.slice(0,i).join("/"), D=anc?((rootBoxByFid(anc)||{}).sub):ROOT;
-  if(!D)return; D.W=D.W||[]; D.W.push({from:fp.slice(i).join("/"),to:tp.slice(i).join("/")});   // auto-routed (no path)
-}
 let arrowDraw=null, previewPath=null;
 function startArrow(e,fromId){e.preventDefault();
   arrowDraw={from:fromId,cells:[]};
@@ -909,11 +1193,8 @@ function startArrow(e,fromId){e.preventDefault();
   beginDrag(e,ev=>{const[c,r]=evCell(ev);pushCell(c,r);drawPreview();},
     ev=>{const tgt=boxAt(...evCell(ev));
       if(previewPath){previewPath.remove();previewPath=null;}
-      let added=false;
-      if(tgt&&tgt!==arrowDraw.from){
-        addWireBase(arrowDraw.from,tgt); renderKeepView(); added=true;   // persist to the base tree + re-project
-      }
-      arrowDraw=null;if(added)commit();});
+      if(tgt&&tgt!==arrowDraw.from)dispatch({op:"addWire",from:arrowDraw.from,to:tgt},{src:"ui"});   // auto-routed, stored at the common-ancestor level
+      arrowDraw=null;});
 }
 function pushCell(c,r){const cs=arrowDraw.cells;if(!cs.length){cs.push([c,r]);return;}
   let [pc,pr]=cs[cs.length-1]; if(pc===c&&pr===r)return;
@@ -923,14 +1204,17 @@ function pushCell(c,r){const cs=arrowDraw.cells;if(!cs.length){cs.push([c,r]);re
 }
 function drawPreview(){if(!previewPath)return;const pts=arrowDraw.cells.map(([c,r])=>[cx(c),cy(r)]);
   if(!pts.length)return;previewPath.setAttribute("d","M"+pts.map(a=>a[0]+","+a[1]).join(" L"));}
-function boxAt(c,r){for(const id in BOX){const b=BOX[id];if(c>=b.col&&c<b.col+b.cw&&r>=b.row&&r<b.row+b.ch)return id;}return null;}
+function boxAt(c,r){let best=null,bd=-1;                   // innermost box under the cell (a child wins over its container)
+  for(const id in BOX){const b=BOX[id];if(c>=b.col&&c<b.col+b.cw&&r>=b.row&&r<b.row+b.ch&&(b._depth||0)>bd){best=id;bd=b._depth||0;}}return best;}
 
 /* wire delete via hit paths */
+// A displayed wire → its command address {from,to,nth}: full fids + its rank among same-ended wires of its level.
+function wireAddr(wi){ const dw=W[wi]; if(!dw)return null; const src=dw._srcW||W, si=dw._srcW?dw._srcI:wi, sw=src[si];
+  let nth=0; for(let i=0;i<si;i++)if(src[i].from===sw.from&&src[i].to===sw.to)nth++;
+  return {from:dw.from,to:dw.to,nth}; }
 bindStart(wiresEl,e=>{const t=pt(e),el=document.elementFromPoint(t.clientX,t.clientY);const hit=el&&el.closest&&el.closest("path.hit");if(!hit)return;
-  if(editMode&&tool==="del"){e.stopPropagation();const dw=W[+hit.dataset.wi];
-    if(dw&&dw._srcW){dw._srcW.splice(dw._srcI,1);render();}   // expanded: delete from the source level's W, then rebuild the overlay
-    else{W.splice(+hit.dataset.wi,1);routeAndDraw();}          // collapsed: W is ROOT.W
-    commit();}});
+  if(editMode&&tool==="del"){e.stopPropagation();const a=wireAddr(+hit.dataset.wi);
+    if(a)dispatch(Object.assign({op:"deleteWire"},a),{src:"ui"});}});
 
 /* ---- edit fields ---- */
 function fillEditFields(id){const b=BOX[id];if(!b)return;
@@ -938,17 +1222,20 @@ function fillEditFields(id){const b=BOX[id];if(!b)return;
   document.getElementById("ef-s").value=b.s||"";
   document.getElementById("ef-cls").value=(b.cls||"").replace("multi","").trim()||"";
 }
-document.getElementById("ef-n").addEventListener("input",e=>{if(selBox){setBoxName(selBox,e.target.value);layoutBoxes();}});
-document.getElementById("ef-s").addEventListener("input",e=>{if(selBox){setBoxSub(selBox,e.target.value);layoutBoxes();}});
-document.getElementById("ef-n").addEventListener("change",e=>{if(selBox)commit();});
-document.getElementById("ef-s").addEventListener("change",e=>{if(selBox)commit();});
-document.getElementById("ef-cls").addEventListener("change",e=>{if(selBox){setBoxCls(selBox,e.target.value);buildBoxes();routeAndDraw();showLevers(selBox);commit();}});
+// Typing previews on the box only (no model change per keystroke); leaving the field dispatches one setBox.
+function previewText(sel,v){ const el=selBox&&boxEls[selBox]; if(!el)return; const t=el.querySelector(sel); t.textContent=v; if(sel===".s")t.style.display=v?"":"none"; }
+document.getElementById("ef-n").addEventListener("input",e=>previewText(".n",e.target.value));
+document.getElementById("ef-s").addEventListener("input",e=>previewText(".s",e.target.value));
+document.getElementById("ef-n").addEventListener("change",e=>{if(selBox){setBoxProps(selBox,{n:e.target.value});layoutBoxes();}});
+document.getElementById("ef-s").addEventListener("change",e=>{if(selBox){setBoxProps(selBox,{s:e.target.value});layoutBoxes();}});
+document.getElementById("ef-cls").addEventListener("change",e=>{if(selBox){setBoxProps(selBox,{cls:e.target.value});buildBoxes();routeAndDraw();showLevers(selBox);}});
 
 /* ---- global interactions ---- */
 bindStart(stage,e=>{const t=e.target;if(t&&t.closest&&(t.closest(".box")||t.closest(".lever")))return;stageDown(e);});
 stage.addEventListener("mouseleave",()=>{if(dragging)return;if(pinnedFlow)applyFlow(pinnedFlow);else if(pinned)pin(pinned);else reset();});
 document.getElementById("detail").addEventListener("click",e=>e.stopPropagation());
-document.body.addEventListener("click",()=>{if(moved){moved=false;return;}if(editMode)return;pinned=null;pinnedFlow=null;reset();});
+document.body.addEventListener("click",()=>{if(moved){moved=false;return;}if(editMode)return;
+  if(pinned||pinnedFlow)dispatch({op:"select",id:null},{src:"ui"}); else reset();});
 
 /* ---- flows ---- */
 function applyFlow(f){const set=new Set(f.nodes);
@@ -967,34 +1254,211 @@ const zLabel=document.getElementById("zoomLabel"),bFit=document.getElementById("
 function applyZoom(){stage.style.transform="scale("+zoom+")";stageSizer.style.width=(STAGE_W*zoom)+"px";stageSizer.style.height=(STAGE_H*zoom)+"px";
   if(zLabel)zLabel.textContent=Math.round(zoom*100)+"%";if(bFit)bFit.classList.toggle("on",fitMode);}
 function computeFit(){const aw=stageWrap.clientWidth-zPad,ah=stageWrap.clientHeight-zPad;return Math.max(0.1,Math.min(aw/STAGE_W,ah/STAGE_H));}
-function setZoom(z,fromFit){if(!fromFit)fitMode=false;zoom=Math.max(0.1,Math.min(3,z));applyZoom();if(!fromFit)rec("zoom",{zoom});}
+function setZoom(z,fromFit){if(!fromFit)fitMode=false;zoom=Math.max(0.1,Math.min(3,z));applyZoom();}
 function doFit(){zoom=computeFit();applyZoom();}
 function toggleFit(){fitMode=!fitMode;if(fitMode)doFit();else applyZoom();}
-document.getElementById("btnZoomIn").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom+.1)*10)/10);});
-document.getElementById("btnZoomOut").addEventListener("click",e=>{e.stopPropagation();setZoom(Math.round((zoom-.1)*10)/10);});
-if(bFit)bFit.addEventListener("click",e=>{e.stopPropagation();toggleFit();});
+onClick("btnZoomIn",()=>({op:"zoom",zoom:Math.round((zoom+.1)*10)/10}));
+onClick("btnZoomOut",()=>({op:"zoom",zoom:Math.round((zoom-.1)*10)/10}));
+onClick("btnFit",()=>({op:"fit",on:!fitMode}));
 window.addEventListener("resize",()=>{if(fitMode)doFit();});
 
 /* ---- persistence ---- */
 const LSKEY="griddiagram:"+document.title;
-/* ---- action recorder (debug): every user action → in-memory + localStorage; download as JSONL. ON by default. ---- */
-let RECORDING=true;
-const ACTIONLOG=[], REC_LSKEY=LSKEY+":actions", REC_SESSION=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
-try{const _p=JSON.parse(localStorage.getItem(REC_LSKEY)||"[]");if(Array.isArray(_p))ACTIONLOG.push(..._p.slice(-500));}catch(_){}   // recover prior session (crash-safe)
-function recSnap(){const o={};for(const k in BOX){const b=BOX[k];o[k]=[b.col,b.row,b.cw,b.ch];}return o;}   // post-action geometry of every box
-function rec(type,detail){ if(!RECORDING)return;
-  const e=Object.assign({seq:ACTIONLOG.length,ts:new Date().toISOString(),session:REC_SESSION,cat:"user",type,edit:editMode},detail||{});
+const captureState=()=>({v:4,root:DaigramCore.serializeDiagram(ROOT),expanded:[...EXPANDED]});
+function validExpanded(list){ const valid=new Set(allSubFids(ROOT,"",[])); return new Set((list||[]).filter(f=>valid.has(f))); }   // drop fids whose box/sub is gone
+// Restore an undo/redo snapshot. Not a command itself: the undo/redo command that calls it is.
+function applyState(st){ const src=st&&DaigramCore.stateRoot(st); if(!src)return;
+  ROOT=DaigramCore.buildDiagram(src); EXPANDED=validExpanded(st.expanded); render(); rebuildFlowButtons(); }
+function autosave(){try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));}catch(err){}}
+
+/* ---- undo / redo history ---- */
+let history=[], hidx=-1;
+function histInit(){history=[captureState()];hidx=0;updateHistBtns();}
+function commit(){                                   // record a new committed state (dispatch calls this after every model command)
+  const s=captureState();
+  if(hidx>=0&&JSON.stringify(history[hidx])===JSON.stringify(s)){autosave();return;} // no real change
+  history=history.slice(0,hidx+1);
+  history.push(s);
+  if(history.length>80)history.shift();
+  hidx=history.length-1;
+  autosave();updateHistBtns();
+}
+function undo(){if(hidx<=0)return false;hidx--;applyState(history[hidx]);autosave();updateHistBtns();return true;}
+function redo(){if(hidx>=history.length-1)return false;hidx++;applyState(history[hidx]);autosave();updateHistBtns();return true;}
+function updateHistBtns(){const u=document.getElementById("btnUndo"),r=document.getElementById("btnRedo");
+  if(u)u.disabled=hidx<=0; if(r)r.disabled=hidx>=history.length-1;}
+document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
+  if((e.metaKey||e.ctrlKey)&&k==="z"){e.preventDefault();dispatch({op:e.shiftKey?"redo":"undo"},{src:"ui"});}
+  else if((e.metaKey||e.ctrlKey)&&k==="y"){e.preventDefault();dispatch({op:"redo"},{src:"ui"});}});
+
+/* ---- infinite canvas: grow the grid as you pan toward an edge (edit mode) ---- */
+const GROW_MARGIN=4, GROW_CHUNK=10, GRID_MAX=1500;
+let growQ=false;
+function maybeGrow(){
+  if(!editMode||fitMode||REPLAYING)return;
+  const cell=GRID.cell, w=stageWrap;
+  const overX=STAGE_W*zoom>w.clientWidth+1, overY=STAGE_H*zoom>w.clientHeight+1;
+  const left=w.scrollLeft/zoom, top=w.scrollTop/zoom, vw=w.clientWidth/zoom, vh=w.clientHeight/zoom;
+  let growR=0,growB=0,dc=0,dr=0;
+  if(overX){ if((left+vw)/cell>GRID.cols-GROW_MARGIN)growR=GROW_CHUNK; if(left/cell<GROW_MARGIN)dc=GROW_CHUNK; }
+  if(overY){ if((top+vh)/cell>GRID.rows-GROW_MARGIN)growB=GROW_CHUNK; if(top/cell<GROW_MARGIN)dr=GROW_CHUNK; }
+  if(GRID.cols+growR+dc>GRID_MAX){growR=0;dc=0;}
+  if(GRID.rows+growB+dr>GRID_MAX){growB=0;dr=0;}
+  if(!growR&&!growB&&!dc&&!dr)return;
+  if(EXPANDED.size===0)                              // collapsed: the display IS the root level → a (recorded, replayable) model change
+    dispatch({op:"growGrid",right:growR,bottom:growB,left:dc,top:dr},{src:"engine",noCommit:true,view:false});
+  else {                                             // expanded: the overlay is throwaway — grow only the display (keep display→base offsets exact)
+    if(dc||dr){for(const id in BOX){const b=BOX[id];b.col+=dc;b.row+=dr;if(b._ox!==undefined){b._ox+=dc;b._oy+=dr;}}
+      ZONES.forEach(z=>{z.col+=dc;z.row+=dr;});
+      W.forEach(x=>{if(x.path)x.path=x.path.map(a=>[a[0]+dc,a[1]+dr]);});}
+    GRID.cols+=growR+dc; GRID.rows+=growB+dr;
+    rec("gridGrow",{growR,growB,dc,dr,grid:[GRID.cols,GRID.rows]});
+  }
+  if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
+  sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
+  if(selBox&&editMode)showLevers(selBox);   // a left/top grow shifts the selected box → move its handles too
+}
+stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
+function flash(b,t){if(!b)return;const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
+function download(name,type,text){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();}
+const fileStem=()=>document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()||"diagram";
+/* Save to file: write this layout back to an .html (current state baked into the CONFIG) so reopening
+   the file shows the layout with NO localStorage. Chrome/Edge use the File System Access API (one
+   file-picker grant, then one-click re-saves to the same file); other browsers fall back to a download. */
+let _saveHandle=null;
+const buildSaveHtml=()=>DaigramCore.spliceConfig(HTML_SRC,ROOT);   // splice the fresh CONFIG into the pristine source (markers kept)
+async function saveToFile(btn){
+  const html=buildSaveHtml(), fname=fileStem()+".html";
+  if(window.showSaveFilePicker){
+    try{
+      if(!_saveHandle) _saveHandle=await window.showSaveFilePicker({suggestedName:fname,types:[{description:"HTML",accept:{"text/html":[".html"]}}]});
+      const w=await _saveHandle.createWritable(); await w.write(html); await w.close();
+      flash(btn,"Saved to file ✓"); return;
+    }catch(err){ if(err&&err.name==="AbortError")return; _saveHandle=null; }   // cancelled → stop; blocked (e.g. file://) → fall back to download
+  }
+  download(fname,"text/html",html);
+  flash(btn,"Downloaded ✓");
+}
+
+/* ============================ COMMANDS: the single entry point ============================
+   Every button, gesture, live-agent call and replay step goes through dispatch(cmd). Model commands
+   (DaigramCore.COMMANDS without view:true) change the base tree via DaigramCore.apply and are committed
+   to undo history; view commands (VIEW below) change only what is shown. Each call is recorded as one
+   {k:"cmd"} line, so a session replays exactly. A gesture that keeps its own on-screen frame (the
+   edit-mode freeze) passes {view:false} and refreshes the view itself.
+   opts: src ("ui"|"api"|"agent"|"replay"|"boot"|"engine"), view:false, noCommit:true, btn (for feedback). */
+let REPLAYING=false;
+const vfail=error=>({ok:false,error});
+const VIEW={
+  expand(c){ const b=rootBoxByFid(c.id); if(!b||!b.sub)return vfail('expand: no box "'+c.id+'" with a sub-canvas'); EXPANDED.add(c.id); render(); autosave(); },
+  collapse(c){ if(!EXPANDED.has(c.id))return vfail('collapse: "'+c.id+'" is not expanded'); EXPANDED.delete(c.id); render(); autosave(); },
+  expandAll(){ expandAll(); },
+  collapseAll(){ collapseAll(); },
+  setMode(c){ if(c.edit!==editMode)setMode(c.edit); if(!editMode)reset(); },
+  setTool(c){ setTool(c.tool); },
+  select(c){ if(c.id===null){ pinned=null; pinnedFlow=null; selBox=null; reset(); return; }
+    if(!BOX[c.id])return vfail('select: box "'+c.id+'" is not visible (expand its parent first)');
+    if(editMode&&tool==="select")selectEdit(c.id); else pin(c.id); },
+  showFlow(c){ const f=FLOWS.find(x=>x.label===c.label); if(!f)return vfail('showFlow: no flow "'+c.label+'"'); showFlow(f); },
+  zoom(c){ setZoom(c.zoom); },
+  fit(c){ if(c.on!==fitMode)toggleFit(); },
+  scroll(c){ stageWrap.scrollLeft=c.left; stageWrap.scrollTop=c.top; },
+  info(c){ setInfo(c.on); },
+  details(c){ setDetailsOpen(c.open); },
+  undo(){ return {ok:true,changed:undo()}; },
+  redo(){ return {ok:true,changed:redo()}; },
+  save(c,o){ try{ const s=captureState(); s.__build=BUILD; localStorage.setItem(LSKEY,JSON.stringify(s)); flash(o.btn,"Saved ✓"); }
+    catch(err){ flash(o.btn,"⚠ use Export"); return vfail("save: browser storage is full or blocked — use Export"); } },
+  import(c){ const r=DaigramCore.apply(ROOT,{op:"load",state:c.state}); if(!r.ok)return r;
+    ROOT=r.root; EXPANDED=validExpanded(c.state.expanded); if(!EXPANDED.size)DaigramCore.apply(ROOT,{op:"normalize"});
+    render(); rebuildFlowButtons(); histInit(); autosave(); },
+  export(){ download(fileStem()+".json","application/json",JSON.stringify(captureState(),null,1)); },
+  saveToFile(c,o){ saveToFile(o.btn); },
+  copyConfig(c,o){ const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
+    navigator.clipboard.writeText(js).then(()=>flash(o.btn,"Copied ✓"),()=>{prompt("Copy config:",js);}); },
+  downloadLog(){ downloadLog(); },
+  record(c){ setRecording(c.on); },
+  reset(){ try{localStorage.removeItem(LSKEY);}catch(err){} recFlush(true); location.reload(); },
+};
+function dispatch(cmd,opts){ opts=opts||{}; const t0=performance.now(), src=opts.src||"api";
+  let res, model=false;
+  try{
+    const err=DaigramCore.validate(DaigramCore.COMMANDS,cmd,"op");
+    if(err)res=vfail(err);
+    else if(DaigramCore.COMMANDS[cmd.op].view)res=VIEW[cmd.op](cmd,opts)||{ok:true};
+    else { model=true; res=DaigramCore.apply(ROOT,cmd); if(res.ok)afterModel(cmd,res,opts); }
+  }catch(err){ console.error(err); res=vfail("internal error: "+(err&&err.message||err)); }
+  if(res.root){ res=Object.assign({},res); delete res.root; }
+  recCmd(cmd,res,src,opts,performance.now()-t0);
+  if(!res.ok&&src!=="replay")console.warn("daigram:",res.error);
+  return res;
+}
+// Page-side consequences of a model command: adopt a loaded tree, keep EXPANDED pointing at real
+// boxes, commit to undo history, refresh the view (unless the caller handles it).
+function afterModel(cmd,res,opts){
+  if(cmd.op==="load"){ ROOT=res.root; EXPANDED=validExpanded(cmd.state.expanded); }
+  else if(cmd.op==="deleteBox"){ const gone=f=>f===cmd.id||f.indexOf(cmd.id+"/")===0;
+    EXPANDED=new Set([...EXPANDED].filter(f=>!gone(f))); if(selBox&&gone(selBox))selBox=null; if(pinned&&gone(pinned))pinned=null; }
+  else if(cmd.op==="reparentBox"&&res.fid!==cmd.id){ const o=cmd.id, n=res.fid, re=new Set();
+    EXPANDED.forEach(f=>{ if(f===o)re.add(n); else if(f.indexOf(o+"/")===0)re.add(n+f.slice(o.length)); else re.add(f); }); EXPANDED=re; }
+  if(!opts.noCommit)commit();
+  if(cmd.op==="load"||cmd.op==="addFlow"||cmd.op==="deleteFlow")rebuildFlowButtons();
+  if(opts.view!==false){ if(cmd.op==="load")render(); else renderKeepView(); }
+}
+// Queries: the model catalog (DaigramCore.QUERIES) plus {q:"view"} for what this page shows right now.
+function daigramQuery(q){
+  if(q&&q.q==="view"&&Object.keys(q).length===1)return {ok:true,edit:editMode,tool,zoom,fit:fitMode,expanded:[...EXPANDED],selected:pinned,
+    grid:[GRID.cols,GRID.rows],boxes:recSnap(),wires:W.length,warnWires:document.querySelectorAll("path.wire.warn").length,
+    recording:{on:RECORDING,sink:REC_SINK,session:REC_SESSION,file:REC_FILE}};
+  return DaigramCore.query(ROOT,q); }
+function batch(cmds,src){ const results=[]; for(const c of cmds){ const r=dispatch(c,{src}); results.push(r); if(!r.ok)break; }
+  return {ok:results.length===cmds.length&&results.every(r=>r.ok),results}; }
+
+/* ============================ RECORDER (always on) ============================
+   One log per page load (= session). Line kinds:
+     {k:"session"} header with the starting model state      {k:"cmd"}   every dispatch: command, result,
+     model hash after it (h), display geometry (replayable)  {k:"trace"} engine/pointer observations (debug only)
+   Sink: served by `node daigram.mjs serve`, lines are POSTed to /api/rec and appended on disk to
+   recordings/<page>/<session>.jsonl; opened as a plain file, they stay in this browser (localStorage,
+   last 500) and "Log ⤓" downloads them. */
+let RECORDING=true, REC_SEQ=0, REC_SINK="pending", REC_FILE=null, recQ=[], recTimer=null;
+const ACTIONLOG=[], REC_LSKEY=LSKEY+":actions", REC_PAGE=location.pathname||"/diagram.html",
+      REC_SESSION=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)+"-"+Math.random().toString(36).slice(2,6);
+let REC_PRIOR=[]; try{const p=JSON.parse(localStorage.getItem(REC_LSKEY)||"[]");if(Array.isArray(p))REC_PRIOR=p.slice(-500);}catch(_){}   // earlier sessions in this browser (crash-safe)
+function recSnap(){const o={};for(const k in BOX){const b=BOX[k];o[k]=[b.col,b.row,b.cw,b.ch];}return o;}   // displayed geometry of every box
+function recPush(e){ e.seq=REC_SEQ++; e.ts=new Date().toISOString();
   ACTIONLOG.push(e); if(ACTIONLOG.length>5000)ACTIONLOG.shift();
-  try{localStorage.setItem(REC_LSKEY,JSON.stringify(ACTIONLOG.slice(-500)));}catch(_){}
+  if(REC_SINK==="browser")recStoreLocal();
+  else { recQ.push(e); if(REC_SINK==="server"&&!recTimer)recTimer=setTimeout(recFlush,250); }
   return e; }
+function recStoreLocal(){ try{localStorage.setItem(REC_LSKEY,JSON.stringify(REC_PRIOR.concat(ACTIONLOG).slice(-500)));}catch(_){} }
+function rec(type,detail){ if(!RECORDING)return; return recPush(Object.assign({k:"trace",session:REC_SESSION,cat:"engine",type,edit:editMode},detail||{})); }
+function recCmd(cmd,res,src,opts,ms){
+  if(!RECORDING&&!(cmd&&cmd.op==="record"))return;   // pausing is itself recorded
+  const e={k:"cmd",session:REC_SESSION,src,cmd,ok:!!res.ok};
+  if(!res.ok)e.error=res.error;
+  const out={}; for(const k in res)if(k!=="ok"&&k!=="error")out[k]=res[k]; if(Object.keys(out).length)e.result=out;
+  if(opts.noCommit)e.nc=1;
+  e.h=DaigramCore.hash(ROOT); e.edit=editMode; e.expanded=[...EXPANDED]; e.geom=recSnap(); e.ms=Math.round(ms*10)/10;
+  recPush(e); }
+function recFlush(beacon){ if(recTimer){clearTimeout(recTimer);recTimer=null;} if(REC_SINK!=="server"||!recQ.length)return;
+  const lines=recQ; recQ=[]; const body=JSON.stringify({session:REC_SESSION,page:REC_PAGE,lines});
+  if(beacon&&navigator.sendBeacon&&navigator.sendBeacon("/api/rec",new Blob([body],{type:"application/json"})))return;
+  fetch("/api/rec",{method:"POST",headers:{"content-type":"application/json"},body,keepalive:body.length<60000})
+    .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);}).catch(()=>recSetSink("browser")); }   // server gone → keep recording in the browser
+window.addEventListener("pagehide",()=>recFlush(true));
+function recSetSink(s){ REC_SINK=s; if(s==="server"){ recFlush(); liveConnect(); } else { recQ=[]; recStoreLocal(); } updateRecBtn(); }
+function recDetectSink(){ if(!/^https?:$/.test(location.protocol)){recSetSink("browser");return;}
+  fetch("/api/hello?page="+encodeURIComponent(REC_PAGE)+"&session="+encodeURIComponent(REC_SESSION),{cache:"no-store"})
+    .then(r=>r.ok?r.json():null).then(j=>{ if(j&&j.daigram){REC_FILE=j.file||null;recSetSink("server");} else recSetSink("browser"); })
+    .catch(()=>recSetSink("browser")); }
+function setRecording(on){ RECORDING=on; updateRecBtn(); }
+function updateRecBtn(){ const br=document.getElementById("btnRec"); if(!br)return;
+  br.textContent=RECORDING?(REC_SINK==="server"?"⏺ Rec → file":"⏺ Rec"):"⏸ Rec";
+  br.style.color=RECORDING?"#ff7b72":"#8b949e"; br.style.borderColor=RECORDING?"#ff7b72aa":"#30363d";
+  br.title=(RECORDING?"Recording every action ":"Recording paused ")+(REC_SINK==="server"?"to "+(REC_FILE||"recordings/"):"in this browser only — serve the page with `node daigram.mjs serve` to record to files")+" — click to "+(RECORDING?"pause":"resume"); }
 function downloadLog(){ if(!ACTIONLOG.length){alert("No actions recorded yet.");return;}
-  const jsonl=ACTIONLOG.map(e=>JSON.stringify(e)).join("\n");
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([jsonl],{type:"application/x-ndjson"}));
-  a.download="daigram-actions-"+REC_SESSION+".jsonl";a.click(); }
-(function(){const br=document.getElementById("btnRec"),bl=document.getElementById("btnLog");
-  if(br)br.addEventListener("click",e=>{e.stopPropagation();RECORDING=!RECORDING;
-    br.textContent=RECORDING?"⏺ Rec":"⏸ Rec"; br.style.color=RECORDING?"#ff7b72":"#8b949e"; br.style.borderColor=RECORDING?"#ff7b72aa":"#30363d";});
-  if(bl)bl.addEventListener("click",e=>{e.stopPropagation();downloadLog();});})();
+  download("daigram-"+fileStem()+"-"+REC_SESSION+".jsonl","application/x-ndjson",ACTIONLOG.map(e=>JSON.stringify(e)).join("\n")); }
 /* raw pointer events (cat:"pointer"): down/up/click/dblclick/wheel always; moves recorded while pressed/dragging,
    throttled on grid-cell change (or 60ms) so a drag's trajectory is captured without idle-hover flood. */
 let _pMove=0,_pCell="";
@@ -1009,177 +1473,108 @@ window.addEventListener("pointermove",e=>{ if(!(e.buttons||dragging))return;    
   const c=_recCell(e), cc=c?c.join(","):"", now=Date.now();
   if(cc===_pCell && now-_pMove<60)return;                                                     // throttle: new cell or ≥60ms
   _pMove=now; _pCell=cc; pRec("move",e); },true);
-function clonePath(p){return p?p.map(a=>[a[0],a[1]]):p;}
-/* Serialize the WHOLE tree (a box's `sub` recurses) so nested edits persist; captureState
-   also records the current NAV path so a reload restores the same view. */
-function serializeDiagram(D){D=normDiag(D);const boxes={};
-  for(const id in D.BOX){const b=D.BOX[id];const c={...b};if(b.sub)c.sub=serializeDiagram(b.sub);boxes[id]=c;}
-  return{grid:{...D.GRID},boxes,wires:D.W.map(w=>({...w,path:clonePath(w.path)})),
-    zones:D.ZONES.map(z=>({...z})),desc:{...D.DESC},flows:D.FLOWS.map(f=>({...f,nodes:(f.nodes||[]).slice()}))};}
-function buildDiagram(s){const D=normDiag({grid:undefined});
-  D.GRID={...s.grid};D.W=(s.wires||[]).map(w=>({...w,path:clonePath(w.path)}));
-  D.ZONES=(s.zones||[]).map(z=>({...z}));D.DESC={...(s.desc||{})};D.FLOWS=(s.flows||[]).map(f=>({...f,nodes:(f.nodes||[]).slice()}));
-  D.BOX={};for(const id in(s.boxes||{})){const b={...s.boxes[id]};if(b.sub)b.sub=buildDiagram(b.sub);D.BOX[id]=b;}
-  return D;}
-function captureState(){return{v:4,root:serializeDiagram(ROOT),expanded:[...EXPANDED]};}
-function applyState(st){if(!st)return;
-  const src=st.root?st.root:(st.boxes?{grid:st.grid,boxes:st.boxes,wires:st.wires,zones:st.zones}:null);
-  if(!src)return;
-  ROOT=buildDiagram(src);
-  const valid=new Set(allSubFids(ROOT,"",[]));
-  EXPANDED=new Set((st.expanded||[]).filter(f=>valid.has(f)));   // drop fids whose box/sub is gone
-  render();}
-/* Re-base content to the top-left + right-size the grid. Run when loading a saved
-   layout so accumulated pan-growth / left-shifts can never leave content parked
-   off-screen (which looks like an empty diagram). */
-function normalizeState(){
-  const ids=Object.keys(BOX); if(!ids.length)return;
-  let minC=Infinity,minR=Infinity,maxC=-Infinity,maxR=-Infinity;
-  const acc=(c,r,cw,ch)=>{minC=Math.min(minC,c);minR=Math.min(minR,r);maxC=Math.max(maxC,c+cw);maxR=Math.max(maxR,r+ch);};
-  ids.forEach(id=>{const b=BOX[id];acc(b.col,b.row,b.cw,b.ch);});     // key off the real content (boxes + wires)
-  W.forEach(w=>{if(w.path)w.path.forEach(([c,r])=>acc(c,r,1,1));});
-  const M=2, dc=M-minC, dr=M-minR;
-  if(dc||dr){ids.forEach(id=>{BOX[id].col+=dc;BOX[id].row+=dr;});
-    W.forEach(w=>{if(w.path)w.path=w.path.map(([c,r])=>[c+dc,r+dr]);});
-    ZONES.forEach(z=>{z.col=Math.max(0,z.col+dc);z.row=Math.max(0,z.row+dr);});}
-  GRID.cols=Math.max(12,Math.ceil(maxC+dc+M)); GRID.rows=Math.max(8,Math.ceil(maxR+dr+M));
-  rec("normalize",{cat:"engine",shift:[dc,dr],grid:[GRID.cols,GRID.rows]});   // engine: re-base to top-left + right-size grid (load)
-  sizeStage();renderZones();buildBoxes();routeAndDraw();if(editMode)drawGridOverlay();reset();
-}
-function autosave(){try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));}catch(err){}}
 
-/* ---- undo / redo history ---- */
-let history=[], hidx=-1;
-function histInit(){history=[captureState()];hidx=0;updateHistBtns();}
-function commit(){                                   // record a new committed state
-  const s=captureState();
-  if(hidx>=0&&JSON.stringify(history[hidx])===JSON.stringify(s)){autosave();return;} // no real change
-  history=history.slice(0,hidx+1);
-  history.push(s);
-  if(history.length>80)history.shift();
-  hidx=history.length-1;
-  rec("mutate",{sel:selBox,expanded:[...EXPANDED],boxes:recSnap()});   // debug: geometry of every box after the change
-  autosave();updateHistBtns();
-}
-function undo(){if(hidx>0){hidx--;applyState(history[hidx]);rec("undo",{hidx});autosave();updateHistBtns();}}
-function redo(){if(hidx<history.length-1){hidx++;applyState(history[hidx]);rec("redo",{hidx});autosave();updateHistBtns();}}
-function updateHistBtns(){const u=document.getElementById("btnUndo"),r=document.getElementById("btnRedo");
-  if(u)u.disabled=hidx<=0; if(r)r.disabled=hidx>=history.length-1;}
-document.getElementById("btnUndo").addEventListener("click",e=>{e.stopPropagation();undo();});
-document.getElementById("btnRedo").addEventListener("click",e=>{e.stopPropagation();redo();});
-document.addEventListener("keydown",e=>{const k=e.key.toLowerCase();
-  if((e.metaKey||e.ctrlKey)&&k==="z"){e.preventDefault();e.shiftKey?redo():undo();}
-  else if((e.metaKey||e.ctrlKey)&&k==="y"){e.preventDefault();redo();}});
+/* ---- replay: re-run a recorded session's commands from its starting state ---- */
+// Effect commands (downloads, reload…) are skipped. Reports the first step whose result or model hash
+// differs from the recording. A log may hold several sessions (browser log): opts.session picks one, else the last.
+async function replay(input,opts){ opts=opts||{};
+  const lines=typeof input==="string"?input.split("\n").filter(l=>l.trim()).map(l=>JSON.parse(l)):input;
+  const heads=lines.filter(l=>l.k==="session"), hdr=opts.session?heads.find(h=>h.session===opts.session):heads[heads.length-1];
+  if(!hdr||!hdr.state)return vfail("replay: no session header with a starting state in this log");
+  const cmds=lines.filter(l=>l.k==="cmd"&&l.session===hdr.session).sort((a,b)=>a.seq-b.seq);
+  rec("replay",{cat:"replay",of:hdr.session,steps:cmds.length});
+  const out={ok:true,of:hdr.session,steps:0,skipped:0,diverged:null};
+  REPLAYING=true;
+  try{
+    if(editMode)setMode(false);
+    ROOT=DaigramCore.buildDiagram(DaigramCore.stateRoot(hdr.state)); EXPANDED=validExpanded(hdr.state.expanded);
+    render(); rebuildFlowButtons();
+    let booted=false, prev=null;
+    for(const l of cmds){
+      if(!booted&&l.src!=="boot"){histInit();booted=true;}             // the page's boot loads/normalizes, then starts undo history
+      const sp=DaigramCore.COMMANDS[l.cmd&&l.cmd.op]; if(sp&&sp.effect){out.skipped++;continue;}
+      if(opts.speed>0&&prev)await new Promise(r=>setTimeout(r,Math.min(2000,Math.max(0,Date.parse(l.ts)-Date.parse(prev))/opts.speed)));
+      prev=l.ts;
+      const r=dispatch(l.cmd,{src:"replay",noCommit:!!l.nc}); out.steps++;
+      const h=DaigramCore.hash(ROOT);
+      if(!out.diverged&&(r.ok!==l.ok||(l.h&&h!==l.h)))
+        out.diverged={seq:l.seq,op:l.cmd&&l.cmd.op,recorded:{ok:l.ok,h:l.h,error:l.error},replayed:{ok:r.ok,h,error:r.error}};
+    }
+    if(!booted)histInit();
+  }finally{ requestAnimationFrame(()=>requestAnimationFrame(()=>{REPLAYING=false;})); }   // let replayed scrolls settle without engine growth
+  out.ok=!out.diverged; out.hash=DaigramCore.hash(ROOT); autosave();
+  rec("replayDone",{cat:"replay",ok:out.ok,diverged:out.diverged});
+  return out; }
 
-/* ---- infinite canvas: grow the grid as you pan toward an edge (edit mode) ---- */
-const GROW_MARGIN=4, GROW_CHUNK=10, GRID_MAX=1500;
-function shiftBW(st,dc,dr){if(!st||!st.boxes)return;   // new-format history ({v:3,root,nav}) is self-contained — skip
-  for(const id in st.boxes){st.boxes[id].col+=dc;st.boxes[id].row+=dr;}
-  if(st.wires)st.wires.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
-  if(st.zones)st.zones.forEach(z=>{z.col+=dc;z.row+=dr;});}
-function gridGrow(growR,growB,dc,dr){                 // growR/B add right/bottom; dc/dr shift content right/down (grow left/top)
-  if(dc||dr){for(const id in BOX){BOX[id].col+=dc;BOX[id].row+=dr;}
-    ZONES.forEach(z=>{z.col+=dc;z.row+=dr;});
-    W.forEach(w=>{if(w.path)w.path=w.path.map(a=>[a[0]+dc,a[1]+dr]);});
-    history.forEach(st=>shiftBW(st,dc,dr));}
-  GRID.cols+=growR+dc; GRID.rows+=growB+dr;
-  history.forEach(st=>{if(st&&st.grid){st.grid.cols+=growR+dc; st.grid.rows+=growB+dr;}});   // flat-format snapshots only
-}
-let growQ=false;
-function maybeGrow(){
-  if(!editMode||fitMode)return;
-  const cell=GRID.cell, w=stageWrap;
-  const overX=STAGE_W*zoom>w.clientWidth+1, overY=STAGE_H*zoom>w.clientHeight+1;
-  const left=w.scrollLeft/zoom, top=w.scrollTop/zoom, vw=w.clientWidth/zoom, vh=w.clientHeight/zoom;
-  let growR=0,growB=0,dc=0,dr=0;
-  if(overX){ if((left+vw)/cell>GRID.cols-GROW_MARGIN)growR=GROW_CHUNK; if(left/cell<GROW_MARGIN)dc=GROW_CHUNK; }
-  if(overY){ if((top+vh)/cell>GRID.rows-GROW_MARGIN)growB=GROW_CHUNK; if(top/cell<GROW_MARGIN)dr=GROW_CHUNK; }
-  if(GRID.cols+growR+dc>GRID_MAX){growR=0;dc=0;}
-  if(GRID.rows+growB+dr>GRID_MAX){growB=0;dr=0;}
-  if(!growR&&!growB&&!dc&&!dr)return;
-  gridGrow(growR,growB,dc,dr);
-  rec("gridGrow",{cat:"engine",growR,growB,dc,dr,grid:[GRID.cols,GRID.rows]});   // engine: infinite-canvas grow on pan-to-edge
-  if(dc||dr){w.scrollLeft+=dc*cell*zoom; w.scrollTop+=dr*cell*zoom;}   // keep the view stationary after a left/top shift
-  sizeStage();renderZones();layoutBoxes();routeAndDraw();drawGridOverlay();
-  if(selBox&&editMode)showLevers(selBox);   // a left/top grow shifts the selected box → move its handles too
-}
-stageWrap.addEventListener("scroll",()=>{if(growQ)return;growQ=true;requestAnimationFrame(()=>{growQ=false;maybeGrow();});});
-function flash(b,t){const o=b.textContent;b.textContent=t;setTimeout(()=>b.textContent=o,1200);}
-const bSave=document.getElementById("btnSave");
-bSave.addEventListener("click",e=>{e.stopPropagation();try{const s=captureState();s.__build=BUILD;localStorage.setItem(LSKEY,JSON.stringify(s));flash(bSave,"Saved ✓");}catch(err){flash(bSave,"⚠ use Export");}});
-document.getElementById("btnReset").addEventListener("click",e=>{e.stopPropagation();try{localStorage.removeItem(LSKEY);}catch(err){}location.reload();});
-document.getElementById("btnExport").addEventListener("click",e=>{e.stopPropagation();const blob=new Blob([JSON.stringify(captureState(),null,1)],{type:"application/json"});
-  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json";a.click();});
-document.getElementById("btnImport").addEventListener("click",e=>{e.stopPropagation();document.getElementById("fileImport").click();});
-document.getElementById("fileImport").addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
-  rd.onload=()=>{try{applyState(JSON.parse(rd.result));normalizeState();histInit();autosave();}catch(err){alert("Could not read layout file.");}};rd.readAsText(f);e.target.value="";});
-/* Save to file: write this layout back to an .html (current state baked into the CONFIG) so reopening
-   the file shows the layout with NO localStorage. Chrome/Edge use the File System Access API (one
-   file-picker grant, then one-click re-saves to the same file); other browsers fall back to a download. */
-let _saveHandle=null;
-function buildSaveHtml(){
-  const cfg="let GRID="+JSON.stringify(ROOT.GRID)+";\n"
-          +"let BOX="+JSON.stringify(ROOT.BOX)+";\n"
-          +"let W="+JSON.stringify(ROOT.W)+";\n"
-          +"let ZONES="+JSON.stringify(ROOT.ZONES)+";\n"
-          +"let DESC="+JSON.stringify(ROOT.DESC)+";\n"
-          +"let FLOWS="+JSON.stringify(ROOT.FLOWS)+";\n";
-  return HTML_SRC.replace(/let GRID=[\s\S]*?\nlet ROOT=\{GRID/, cfg+"let ROOT={GRID");   // splice the fresh CONFIG into the pristine source
-}
-async function saveToFile(btn){
-  const html=buildSaveHtml(), fname=(document.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()||"diagram")+".html";
-  if(window.showSaveFilePicker){
-    try{
-      if(!_saveHandle) _saveHandle=await window.showSaveFilePicker({suggestedName:fname,types:[{description:"HTML",accept:{"text/html":[".html"]}}]});
-      const w=await _saveHandle.createWritable(); await w.write(html); await w.close();
-      flash(btn,"Saved to file ✓"); return;
-    }catch(err){ if(err&&err.name==="AbortError")return; _saveHandle=null; }   // cancelled → stop; blocked (e.g. file://) → fall back to download
-  }
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([html],{type:"text/html"}));a.download=fname;a.click();
-  flash(btn,"Downloaded ✓");
-}
-(function(){const b=document.getElementById("btnSaveFile"); if(b)b.addEventListener("click",e=>{e.stopPropagation();saveToFile(b);});})();
-document.getElementById("btnCopyCfg").addEventListener("click",e=>{e.stopPropagation();
-  const js="const GRID="+JSON.stringify(GRID)+";\nconst BOX="+JSON.stringify(BOX,null,2)+";\nconst W="+JSON.stringify(W,null,2)+";";
-  navigator.clipboard.writeText(js).then(()=>flash(e.target,"Copied ✓"),()=>{prompt("Copy config:",js);});});
+/* ---- live link: under `daigram.mjs serve`, an agent drives this page with `daigram.mjs send` ---- */
+function liveConnect(){ if(typeof EventSource==="undefined")return;
+  const es=new EventSource("/api/live?page="+encodeURIComponent(REC_PAGE)+"&session="+encodeURIComponent(REC_SESSION));
+  es.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(_){return;}
+    Promise.resolve().then(()=>m.query?daigramQuery(m.query):m.replay?replay(m.replay,m.opts):Array.isArray(m.cmds)?batch(m.cmds,"agent"):dispatch(m.cmd,{src:"agent"}))
+      .catch(err=>vfail(String(err&&err.message||err)))
+      .then(res=>fetch("/api/live/result",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:m.id,res})})); }; }
 
-/* ---- toolbar: edit + tools ---- */
-document.getElementById("btnEdit").addEventListener("click",e=>{e.stopPropagation();setMode(!editMode);if(!editMode)reset();});
-document.querySelectorAll(".tool").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();setTool(b.dataset.tool);}));
+/* ---- the agent-facing API (also usable from DevTools / CDP) ---- */
+window.daigram=Object.freeze({version:DaigramCore.VERSION,
+  dispatch:cmd=>dispatch(cmd,{src:"api"}), batch:cmds=>batch(cmds,"api"), query:q=>daigramQuery(q),
+  commands:()=>DaigramCore.catalog(), replay:(log,opts)=>replay(log,opts), log:()=>ACTIONLOG.slice(), session:()=>REC_SESSION});
+
+/* ---- toolbar: every button only builds a command ---- */
+function onClick(id,mk){ const b=typeof id==="string"?document.getElementById(id):id;
+  if(b)b.addEventListener("click",e=>{e.stopPropagation(); const c=mk(b); if(c)dispatch(c,{src:"ui",btn:b});}); return b; }
+onClick("btnUndo",()=>({op:"undo"})); onClick("btnRedo",()=>({op:"redo"}));
+onClick("btnSave",()=>({op:"save"})); onClick("btnReset",()=>({op:"reset"})); onClick("btnExport",()=>({op:"export"}));
+onClick("btnSaveFile",()=>({op:"saveToFile"})); onClick("btnCopyCfg",()=>({op:"copyConfig"}));
+onClick("btnRec",()=>({op:"record",on:!RECORDING})); onClick("btnLog",()=>({op:"downloadLog"}));
+onClick("btnEdit",()=>({op:"setMode",edit:!editMode}));
+document.querySelectorAll(".tool").forEach(b=>onClick(b,()=>({op:"setTool",tool:b.dataset.tool})));
+// Opening a file picker is not an action; what the picked file does (import / replay) is.
+function pickFile(btnId,inputId,onText){ document.getElementById(btnId).addEventListener("click",e=>{e.stopPropagation();document.getElementById(inputId).click();});
+  document.getElementById(inputId).addEventListener("change",e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
+    rd.onload=()=>onText(rd.result); rd.readAsText(f); e.target.value="";}); }
+pickFile("btnImport","fileImport",text=>{ let st; try{st=JSON.parse(text);}catch(err){alert("Could not read layout file.");return;}
+  if(!dispatch({op:"import",state:st},{src:"ui"}).ok)alert("Could not read layout file."); });
+pickFile("btnReplay","fileReplay",text=>{ const b=document.getElementById("btnReplay");
+  replay(text).then(out=>{ console.log("daigram replay",out); flash(b,out.ok?"Replayed ✓":(out.diverged?"⚠ diverged":"⚠ "+out.error)); })
+    .catch(err=>{ console.error(err); flash(b,"⚠ bad log"); }); });
 
 /* ---- header info toggle (persisted) ---- */
 const INFOKEY="griddiagram:noinfo:"+document.title, btnInfo=document.getElementById("btnInfo");
 function setInfo(show){document.body.classList.toggle("noinfo",!show);btnInfo.classList.toggle("on",show);
   try{localStorage.setItem(INFOKEY,show?"1":"0");}catch(_){}
   if(fitMode)doFit();}
-btnInfo.addEventListener("click",e=>{e.stopPropagation();setInfo(document.body.classList.contains("noinfo"));});
+onClick(btnInfo,()=>({op:"info",on:document.body.classList.contains("noinfo")}));
 try{setInfo(localStorage.getItem(INFOKEY)!=="0");}catch(_){setInfo(true);}
 
 /* ---- detail close/reopen ---- */
-(function(){const d=document.getElementById("detail");const x=document.createElement("button");
-  x.type="button";x.className="d-close";x.title="Close panel";x.textContent="×";d.insertBefore(x,d.firstChild);
-  const re=document.createElement("button");re.type="button";re.className="d-reopen";re.textContent="◂ Details";document.body.appendChild(re);
-  function setOpen(o){d.classList.toggle("collapsed",!o);re.style.display=o?"none":"flex";}
-  x.addEventListener("click",ev=>{ev.stopPropagation();setOpen(false);});
-  re.addEventListener("click",ev=>{ev.stopPropagation();setOpen(true);});
-})();
+const detailEl=document.getElementById("detail"), dClose=document.createElement("button"), dReopen=document.createElement("button");
+dClose.type="button";dClose.className="d-close";dClose.title="Close panel";dClose.textContent="×";detailEl.insertBefore(dClose,detailEl.firstChild);
+dReopen.type="button";dReopen.className="d-reopen";dReopen.textContent="◂ Details";document.body.appendChild(dReopen);
+function setDetailsOpen(o){detailEl.classList.toggle("collapsed",!o);dReopen.style.display=o?"none":"flex";}
+onClick(dClose,()=>({op:"details",open:false})); onClick(dReopen,()=>({op:"details",open:true}));
 
-/* ---- flow buttons ---- */
-(function(){const tb=document.querySelector(".toolbar"),hint=tb.querySelector(".hint");
-  FLOWS.forEach(f=>{const b=document.createElement("button");b.textContent=f.label;b.style.borderColor="#2dd4bf";b.style.color="#5eead4";
-    b.addEventListener("click",e=>{e.stopPropagation();showFlow(f);});tb.insertBefore(b,hint||null);});})();
+/* ---- Expand-all / Collapse-all + flow buttons (flows rebuilt whenever the model's flows change) ---- */
+const toolbarEl=document.querySelector(".toolbar"), hintEl=toolbarEl.querySelector(".hint");
+function toolbarBtn(text,color,mk,cls){const b=document.createElement("button");b.textContent=text;b.style.borderColor=color[0];b.style.color=color[1];
+  if(cls)b.className=cls; onClick(b,mk); toolbarEl.insertBefore(b,hintEl||null); return b;}
+const btnExpandAll=toolbarBtn("⤢ Expand all",["#8fbce6aa","#9ecbff"],()=>({op:"expandAll"}));
+toolbarBtn("⤡ Collapse all",["#8fbce6aa","#9ecbff"],()=>({op:"collapseAll"}));
+function rebuildFlowButtons(){ toolbarEl.querySelectorAll(".flowbtn").forEach(b=>b.remove());
+  (ROOT.FLOWS||[]).forEach(f=>{ const b=toolbarBtn(f.label,["#2dd4bf","#5eead4"],()=>({op:"showFlow",label:f.label}),"flowbtn");
+    toolbarEl.insertBefore(b,btnExpandAll); }); }
 
 /* ---- boot ---- */
-render();
+render(); rebuildFlowButtons();
+recPush({k:"session",session:REC_SESSION,v:DaigramCore.VERSION,build:BUILD,title:document.title,page:REC_PAGE,ua:navigator.userAgent,state:captureState()});
+recDetectSink(); updateRecBtn();
 try{const saved=localStorage.getItem(LSKEY);if(saved){const s=JSON.parse(saved);
-  if(s.__build===BUILD){applyState(s);if(!EXPANDED.size)normalizeState();}   // only restore a save made against THIS build; normalize only when collapsed
+  if(s.__build===BUILD){ dispatch({op:"load",state:s},{src:"boot",noCommit:true});     // only restore a save made against THIS build
+    if(!EXPANDED.size)dispatch({op:"normalize"},{src:"boot",noCommit:true}); }      // normalize only when collapsed
   else localStorage.removeItem(LSKEY);
 }}catch(err){}
-(function(){const tb=document.querySelector(".toolbar"),hint=tb.querySelector(".hint");   // Expand-all / Collapse-all
-  const mk=(t,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.borderColor="#8fbce6aa";b.style.color="#9ecbff";
-    b.addEventListener("click",e=>{e.stopPropagation();fn();});tb.insertBefore(b,hint||null);};
-  mk("⤢ Expand all",expandAll); mk("⤡ Collapse all",collapseAll);})();
 histInit();
+{ const qp=new URLSearchParams(location.search), log=qp.get("replay");   // ?replay=<recording url>[&speed=1] — e.g. a file under /recordings/
+  if(log)fetch(log).then(r=>r.text()).then(t=>replay(t,{speed:+qp.get("speed")||0})).then(out=>console.log("daigram replay",out)); }
 </script>
 </body>
 </html>
